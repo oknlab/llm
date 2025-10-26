@@ -1,0 +1,35 @@
+# Core Framework
+fastapi
+uvicorn
+pyngrok
+
+# LLM & AI
+transformers
+torch
+accelerate
+bitsandbytes
+sentencepiece
+
+# RAG & Vector Store
+langchain
+langchain-community
+chromadb
+sentence-transformers
+faiss-cpu
+
+# Web Scraping
+beautifulsoup4
+requests
+lxml
+selenium
+fake-useragent
+
+# Utilities
+python-dotenv
+pydantic
+pydantic-settings
+python-multipart
+aiofiles
+
+# Monitoring & Security
+cryptography
