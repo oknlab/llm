@@ -1,300 +1,509 @@
 """
-╔═══════════════════════════════════════════════════════════════════════╗
-║  COLAB LAUNCHER - FastAPI Server with NGROK Tunneling                 ║
-║  Orchestrates: API Server + WebSocket + Dashboard + Monitoring        ║
-╚═══════════════════════════════════════════════════════════════════════╝
+ELITE MULTI-AGENT SYSTEM - PRODUCTION RUNNER
+FastAPI + Airflow + NGROK Integration
+Execute in Google Colab or Local Environment
 """
 
 import os
 import sys
 import asyncio
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional
+from contextlib import asynccontextmanager
 import json
 from pathlib import Path
-from typing import Dict, Any, List
-from datetime import datetime
-import nest_asyncio
+import uuid
 
-# Allow nested event loops in Colab
-nest_asyncio.apply()
+# Environment
+from dotenv import load_dotenv
+load_dotenv()
 
-# FastAPI & Uvicorn
-from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, Security
-from fastapi.middleware.cors import CORSMiddleware
+# FastAPI
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.security import APIKeyHeader
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-import uvicorn
+from pydantic import BaseModel, Field
 
-# Monitoring
-from prometheus_client import make_asgi_app, generate_latest
-from starlette.responses import Response
+# Airflow
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.utils.dates import days_ago
 
 # NGROK
 from pyngrok import ngrok, conf
 
-# Logging
-from loguru import logger
+# Monitoring
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+import psutil
 
-# System imports
-from system import (
-    orchestrator,
-    TaskRequest,
-    TaskResponse,
-    AgentType,
-    system_health_check,
-    settings,
-    WorkflowDAG
+# System
+from system import AgentOrchestrator, AgentType, Task, TaskStatus
+
+# ==============================================
+# LOGGING
+# ==============================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('agent_system.log')
+    ]
 )
+logger = logging.getLogger(__name__)
 
-# ============================================================================
+
+# ==============================================
 # CONFIGURATION
-# ============================================================================
+# ==============================================
+class SystemConfig:
+    """System-wide configuration"""
+    
+    # Environment
+    ENVIRONMENT = os.getenv('ENVIRONMENT', 'production')
+    DEBUG = os.getenv('DEBUG', 'false').lower() == 'true'
+    
+    # NGROK
+    NGROK_AUTH_TOKEN = os.getenv('NGROK_AUTH_TOKEN', '')
+    NGROK_PORT = int(os.getenv('NGROK_PORT', 8000))
+    
+    # Model
+    MODEL_CONFIG = {
+        'MODEL_NAME': os.getenv('MODEL_NAME', 'Qwen/Qwen2.5-1.5B-Instruct'),
+        'MODEL_DEVICE': os.getenv('MODEL_DEVICE', 'cuda'),
+        'MODEL_QUANTIZATION': os.getenv('MODEL_QUANTIZATION', '8bit'),
+        'MAX_NEW_TOKENS': os.getenv('MAX_NEW_TOKENS', '2048'),
+        'TEMPERATURE': os.getenv('TEMPERATURE', '0.7'),
+        'TOP_P': os.getenv('TOP_P', '0.95')
+    }
+    
+    # RAG
+    RAG_CONFIG = {
+        'GOOGLE_CSE_ID': os.getenv('GOOGLE_CSE_ID', ''),
+        'GOOGLE_API_KEY': os.getenv('GOOGLE_API_KEY', ''),
+        'EMBEDDING_MODEL': os.getenv('EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2'),
+        'CHUNK_SIZE': os.getenv('CHUNK_SIZE', '1000'),
+        'CHUNK_OVERLAP': os.getenv('CHUNK_OVERLAP', '200'),
+        'TOP_K_RESULTS': os.getenv('TOP_K_RESULTS', '5')
+    }
+    
+    # API
+    API_KEY = os.getenv('API_KEY', 'sk-elite-agent-system-2024')
+    CORS_ORIGINS = json.loads(os.getenv('CORS_ORIGINS', '["*"]'))
 
-# Configure logger
-logger.remove()
-logger.add(sys.stdout, colorize=True, format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>")
-logger.add("logs/system_{time}.log", rotation="500 MB", retention="10 days", compression="zip")
 
-# Security
-API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+# ==============================================
+# METRICS
+# ==============================================
+class Metrics:
+    """Prometheus metrics"""
+    
+    task_counter = Counter('agent_tasks_total', 'Total tasks processed', ['agent', 'status'])
+    task_duration = Histogram('agent_task_duration_seconds', 'Task duration', ['agent'])
+    system_cpu = Counter('system_cpu_percent', 'CPU usage')
+    system_memory = Counter('system_memory_percent', 'Memory usage')
 
-async def verify_api_key(api_key: str = Security(API_KEY_HEADER)):
-    """API key validation"""
-    if api_key != settings.API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API Key")
-    return api_key
 
-# ============================================================================
+# ==============================================
+# GLOBAL STATE
+# ==============================================
+class GlobalState:
+    """Application state"""
+    orchestrator: Optional[AgentOrchestrator] = None
+    tasks: Dict[str, Task] = {}
+    metrics = Metrics()
+    public_url: Optional[str] = None
+
+
+# ==============================================
+# PYDANTIC MODELS
+# ==============================================
+class TaskRequest(BaseModel):
+    agent: str = Field(..., description="Agent type")
+    query: str = Field(..., description="Task query", min_length=1)
+    use_rag: bool = Field(True, description="Enable RAG")
+    context: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskResponse(BaseModel):
+    task_id: str
+    status: str
+    message: str
+
+
+class TaskResult(BaseModel):
+    task_id: str
+    status: str
+    result: Optional[str] = None
+    metadata: Dict[str, Any] = {}
+    error: Optional[str] = None
+
+
+class SystemStatus(BaseModel):
+    status: str
+    agents: List[str]
+    tasks_total: int
+    tasks_pending: int
+    tasks_running: int
+    tasks_completed: int
+    public_url: Optional[str]
+    cpu_percent: float
+    memory_percent: float
+    uptime_seconds: float
+
+
+# ==============================================
+# LIFESPAN MANAGEMENT
+# ==============================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan"""
+    logger.info("🚀 Starting Elite Multi-Agent System...")
+    
+    # Initialize orchestrator
+    config = {**SystemConfig.MODEL_CONFIG, **SystemConfig.RAG_CONFIG}
+    GlobalState.orchestrator = AgentOrchestrator(config)
+    logger.info("✅ Agent Orchestrator initialized")
+    
+    # Setup NGROK tunnel
+    if SystemConfig.NGROK_AUTH_TOKEN:
+        try:
+            conf.get_default().auth_token = SystemConfig.NGROK_AUTH_TOKEN
+            tunnel = ngrok.connect(
+                SystemConfig.NGROK_PORT,
+                bind_tls=True
+            )
+            GlobalState.public_url = tunnel.public_url
+            logger.info(f"🌐 NGROK Tunnel: {GlobalState.public_url}")
+        except Exception as e:
+            logger.error(f"NGROK setup failed: {e}")
+    
+    # Start time
+    GlobalState.start_time = datetime.now()
+    
+    yield
+    
+    # Shutdown
+    logger.info("🛑 Shutting down...")
+    if SystemConfig.NGROK_AUTH_TOKEN:
+        ngrok.kill()
+
+
+# ==============================================
 # FASTAPI APPLICATION
-# ============================================================================
-
+# ==============================================
 app = FastAPI(
-    title="🔷 Elite Multi-Agent System",
-    description="Enterprise AI Orchestration with RAG, LangGraph & Multi-Agent Coordination",
-    version="2.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc"
+    title="Elite Multi-Agent Orchestration System",
+    description="Enterprise-grade AI agent orchestration with RAG, LangGraph, and Airflow",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=SystemConfig.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Prometheus metrics endpoint
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
 
-# ============================================================================
-# WEBSOCKET CONNECTION MANAGER
-# ============================================================================
-
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
+# ==============================================
+# BACKGROUND TASK PROCESSOR
+# ==============================================
+async def process_task_background(task_id: str, use_rag: bool):
+    """Background task processor"""
+    task = GlobalState.tasks.get(task_id)
+    if not task:
+        return
     
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        logger.info(f"WebSocket connected. Total: {len(self.active_connections)}")
-    
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-        logger.info(f"WebSocket disconnected. Total: {len(self.active_connections)}")
-    
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception as e:
-                logger.error(f"Broadcast error: {e}")
+    try:
+        task.status = TaskStatus.RUNNING
+        start_time = datetime.now()
+        
+        # Process with orchestrator
+        result = GlobalState.orchestrator.process_task(task, use_rag=use_rag)
+        
+        # Update task
+        task.status = TaskStatus.COMPLETED if result['status'] == 'success' else TaskStatus.FAILED
+        task.result = result.get('result')
+        task.metadata = result.get('metadata', {})
+        task.completed_at = datetime.now()
+        
+        # Metrics
+        duration = (datetime.now() - start_time).total_seconds()
+        Metrics.task_counter.labels(agent=task.agent_type.value, status=task.status.value).inc()
+        Metrics.task_duration.labels(agent=task.agent_type.value).observe(duration)
+        
+        logger.info(f"✅ Task {task_id} completed in {duration:.2f}s")
+        
+    except Exception as e:
+        logger.error(f"❌ Task {task_id} failed: {e}")
+        task.status = TaskStatus.FAILED
+        task.metadata['error'] = str(e)
+        Metrics.task_counter.labels(agent=task.agent_type.value, status='failed').inc()
 
-manager = ConnectionManager()
 
-# ============================================================================
+# ==============================================
 # API ENDPOINTS
-# ============================================================================
-
+# ==============================================
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Serve dashboard"""
     dashboard_path = Path("dashboard.html")
     if dashboard_path.exists():
         return HTMLResponse(content=dashboard_path.read_text(), status_code=200)
-    else:
-        return HTMLResponse(content="<h1>Dashboard not found. Ensure dashboard.html exists.</h1>", status_code=404)
+    return HTMLResponse(content="<h1>Elite Agent System</h1><p>Dashboard not found</p>")
 
-@app.get("/api/health")
+
+@app.get("/health")
 async def health():
-    """System health check"""
-    return await system_health_check()
+    """Health check"""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
-@app.post("/api/task", response_model=TaskResponse)
-async def execute_task(task: TaskRequest, api_key: str = Depends(verify_api_key)):
-    """Execute agent task"""
-    logger.info(f"Received task: {task.task_id}")
+
+@app.get("/status", response_model=SystemStatus)
+async def status():
+    """System status"""
+    tasks = list(GlobalState.tasks.values())
     
-    # Broadcast task start
-    await manager.broadcast({
-        "event": "task_started",
-        "task_id": task.task_id,
-        "description": task.description
-    })
-    
+    return SystemStatus(
+        status="operational",
+        agents=[agent.value for agent in AgentType if agent != AgentType.ORCHESTRATOR],
+        tasks_total=len(tasks),
+        tasks_pending=sum(1 for t in tasks if t.status == TaskStatus.PENDING),
+        tasks_running=sum(1 for t in tasks if t.status == TaskStatus.RUNNING),
+        tasks_completed=sum(1 for t in tasks if t.status == TaskStatus.COMPLETED),
+        public_url=GlobalState.public_url,
+        cpu_percent=psutil.cpu_percent(),
+        memory_percent=psutil.virtual_memory().percent,
+        uptime_seconds=(datetime.now() - GlobalState.start_time).total_seconds()
+    )
+
+
+@app.post("/task", response_model=TaskResponse)
+async def create_task(request: TaskRequest, background_tasks: BackgroundTasks):
+    """Create and execute task"""
     try:
-        result = await orchestrator.execute_task(task)
+        # Validate agent
+        try:
+            agent_type = AgentType[request.agent.upper().replace('-', '_')]
+        except KeyError:
+            raise HTTPException(400, f"Invalid agent: {request.agent}")
         
-        # Broadcast task completion
-        await manager.broadcast({
-            "event": "task_completed",
-            "task_id": task.task_id,
-            "result": result.dict()
-        })
+        # Create task
+        task_id = str(uuid.uuid4())
+        task = Task(
+            id=task_id,
+            agent_type=agent_type,
+            query=request.query,
+            context=request.context
+        )
         
-        return result
+        GlobalState.tasks[task_id] = task
+        
+        # Schedule background processing
+        background_tasks.add_task(process_task_background, task_id, request.use_rag)
+        
+        logger.info(f"📝 Task {task_id} created for agent {agent_type.value}")
+        
+        return TaskResponse(
+            task_id=task_id,
+            status="accepted",
+            message=f"Task submitted to {agent_type.value}"
+        )
     
     except Exception as e:
-        logger.error(f"Task execution error: {e}")
-        await manager.broadcast({
-            "event": "task_failed",
-            "task_id": task.task_id,
-            "error": str(e)
-        })
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Task creation error: {e}")
+        raise HTTPException(500, str(e))
 
-@app.get("/api/agents")
+
+@app.get("/task/{task_id}", response_model=TaskResult)
+async def get_task(task_id: str):
+    """Get task result"""
+    task = GlobalState.tasks.get(task_id)
+    
+    if not task:
+        raise HTTPException(404, "Task not found")
+    
+    return TaskResult(
+        task_id=task.id,
+        status=task.status.value,
+        result=task.result,
+        metadata=task.metadata,
+        error=task.metadata.get('error')
+    )
+
+
+@app.get("/tasks")
+async def list_tasks(limit: int = 100, status: Optional[str] = None):
+    """List tasks"""
+    tasks = list(GlobalState.tasks.values())
+    
+    if status:
+        try:
+            status_enum = TaskStatus(status)
+            tasks = [t for t in tasks if t.status == status_enum]
+        except ValueError:
+            pass
+    
+    tasks = sorted(tasks, key=lambda t: t.created_at, reverse=True)[:limit]
+    
+    return {
+        "total": len(tasks),
+        "tasks": [
+            {
+                "id": t.id,
+                "agent": t.agent_type.value,
+                "status": t.status.value,
+                "query": t.query[:100],
+                "created_at": t.created_at.isoformat(),
+                "completed_at": t.completed_at.isoformat() if t.completed_at else None
+            }
+            for t in tasks
+        ]
+    }
+
+
+@app.get("/agents")
 async def list_agents():
     """List available agents"""
     return {
         "agents": [
             {
-                "type": agent_type.value,
-                "status": "active",
-                "specialty": agent.specialty
+                "type": agent.value,
+                "name": agent.name,
+                "description": f"Specialized {agent.value} agent"
             }
-            for agent_type, agent in orchestrator.agents.items()
+            for agent in AgentType
+            if agent != AgentType.ORCHESTRATOR
         ]
     }
 
-@app.get("/api/dag")
-async def get_dag():
-    """Get workflow DAG definition"""
-    return WorkflowDAG.create_agent_pipeline()
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket for real-time updates"""
-    await manager.connect(websocket)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            # Echo or process
-            await websocket.send_json({"status": "received", "data": data})
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-
-# ============================================================================
-# NGROK TUNNEL
-# ============================================================================
-
-def setup_ngrok(port: int = 8000) -> str:
-    """Setup NGROK tunnel"""
-    ngrok_token = os.getenv("NGROK_AUTH_TOKEN")
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics"""
+    # Update system metrics
+    Metrics.system_cpu.inc(psutil.cpu_percent())
+    Metrics.system_memory.inc(psutil.virtual_memory().percent)
     
-    if ngrok_token:
-        conf.get_default().auth_token = ngrok_token
-        logger.info("NGROK token configured")
-    else:
-        logger.warning("NGROK_AUTH_TOKEN not set. Using free tier (may be unstable).")
-    
-    # Terminate existing tunnels
-    ngrok.kill()
-    
-    # Create tunnel
-    public_url = ngrok.connect(port, bind_tls=True)
-    logger.success(f"🌐 NGROK Tunnel: {public_url}")
-    
-    return public_url.public_url
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-# ============================================================================
-# STARTUP & SHUTDOWN
-# ============================================================================
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize system on startup"""
-    logger.info("🚀 Starting Elite Multi-Agent System...")
+# ==============================================
+# AIRFLOW DAGS
+# ==============================================
+def create_airflow_dags():
+    """Create Airflow DAGs for scheduled tasks"""
     
-    # Create directories
-    Path("logs").mkdir(exist_ok=True)
-    Path(settings.CHROMA_PERSIST_DIR).mkdir(exist_ok=True)
+    # DAG 1: System Health Check
+    with DAG(
+        'system_health_check',
+        default_args={'owner': 'elite-system'},
+        description='Monitor system health',
+        schedule_interval='*/5 * * * *',  # Every 5 minutes
+        start_date=days_ago(1),
+        catchup=False
+    ) as health_dag:
+        
+        def check_system_health():
+            cpu = psutil.cpu_percent()
+            memory = psutil.virtual_memory().percent
+            logger.info(f"Health Check - CPU: {cpu}%, Memory: {memory}%")
+            
+            if cpu > 90 or memory > 90:
+                logger.warning("System resources high!")
+        
+        health_task = PythonOperator(
+            task_id='check_health',
+            python_callable=check_system_health
+        )
     
-    # Warm up models
-    logger.info("Warming up AI models...")
-    await system_health_check()
+    # DAG 2: Periodic RAG Index Update
+    with DAG(
+        'rag_index_update',
+        default_args={'owner': 'elite-system'},
+        description='Update RAG indices',
+        schedule_interval='0 */6 * * *',  # Every 6 hours
+        start_date=days_ago(1),
+        catchup=False
+    ) as rag_dag:
+        
+        def update_rag_indices():
+            logger.info("Updating RAG indices...")
+            # Trigger index rebuild for common queries
+            common_queries = [
+                "latest technology trends",
+                "software engineering best practices",
+                "cybersecurity updates"
+            ]
+            
+            for query in common_queries:
+                if GlobalState.orchestrator:
+                    GlobalState.orchestrator.rag.build_rag_index(query)
+        
+        update_task = PythonOperator(
+            task_id='update_indices',
+            python_callable=update_rag_indices
+        )
     
-    logger.success("✅ System ready")
+    # DAG 3: Task Cleanup
+    with DAG(
+        'task_cleanup',
+        default_args={'owner': 'elite-system'},
+        description='Clean old tasks',
+        schedule_interval='0 0 * * *',  # Daily
+        start_date=days_ago(1),
+        catchup=False
+    ) as cleanup_dag:
+        
+        def cleanup_old_tasks():
+            logger.info("Cleaning old tasks...")
+            cutoff = datetime.now() - timedelta(days=7)
+            
+            tasks_to_remove = [
+                task_id for task_id, task in GlobalState.tasks.items()
+                if task.created_at < cutoff
+            ]
+            
+            for task_id in tasks_to_remove:
+                del GlobalState.tasks[task_id]
+            
+            logger.info(f"Removed {len(tasks_to_remove)} old tasks")
+        
+        cleanup_task = PythonOperator(
+            task_id='cleanup_tasks',
+            python_callable=cleanup_old_tasks
+        )
+    
+    return [health_dag, rag_dag, cleanup_dag]
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    logger.info("Shutting down...")
-    ngrok.kill()
 
-# ============================================================================
-# MAIN LAUNCHER
-# ============================================================================
-
+# ==============================================
+# MAIN EXECUTION
+# ==============================================
 def main():
-    """Main entry point for Colab"""
+    """Main execution function"""
+    import uvicorn
     
-    print("""
-    ╔═══════════════════════════════════════════════════════════════════════╗
-    ║                                                                       ║
-    ║         🔷 ELITE MULTI-AGENT ORCHESTRATION SYSTEM 🔷                  ║
-    ║                                                                       ║
-    ║  Architecture: LangGraph + RAG + Qwen3-1.7B + FastAPI               ║
-    ║  Agents: CodeArchitect | SecAnalyst | AutoBot | AgentSuite           ║
-    ║          CreativeAgent | AgCustom                                    ║
-    ║                                                                       ║
-    ╚═══════════════════════════════════════════════════════════════════════╝
-    """)
+    # Create Airflow DAGs (in production, these would be in separate files)
+    dags = create_airflow_dags()
+    logger.info(f"Created {len(dags)} Airflow DAGs")
     
-    port = 8000
+    # Run server
+    logger.info(f"Starting FastAPI server on port {SystemConfig.NGROK_PORT}...")
     
-    # Setup NGROK
-    try:
-        public_url = setup_ngrok(port)
-        print(f"\n✅ PUBLIC URL: {public_url}")
-        print(f"📊 Dashboard: {public_url}")
-        print(f"📖 API Docs: {public_url}/api/docs")
-        print(f"📈 Metrics: {public_url}/metrics\n")
-    except Exception as e:
-        logger.error(f"NGROK setup failed: {e}")
-        logger.warning("Running without NGROK tunnel")
-        public_url = None
-    
-    # Start server
-    config = uvicorn.Config(
+    uvicorn.run(
         app,
         host="0.0.0.0",
-        port=port,
-        log_level="info",
-        access_log=True
+        port=SystemConfig.NGROK_PORT,
+        log_level="info" if not SystemConfig.DEBUG else "debug"
     )
-    server = uvicorn.Server(config)
-    
-    try:
-        server.run()
-    except KeyboardInterrupt:
-        logger.info("Server stopped by user")
-    finally:
-        if public_url:
-            ngrok.kill()
+
 
 if __name__ == "__main__":
     main()
