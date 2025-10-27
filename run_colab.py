@@ -1,283 +1,300 @@
 """
-🚀 ENTERPRISE MULTI-AGENT ORCHESTRATION SYSTEM - ENTRY POINT
-Elite architecture: Modular, scalable, production-ready
+╔═══════════════════════════════════════════════════════════════════════╗
+║  COLAB LAUNCHER - FastAPI Server with NGROK Tunneling                 ║
+║  Orchestrates: API Server + WebSocket + Dashboard + Monitoring        ║
+╚═══════════════════════════════════════════════════════════════════════╝
 """
 
 import os
 import sys
 import asyncio
-import logging
+import json
 from pathlib import Path
-from typing import Optional
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-from fastapi import FastAPI, WebSocket, HTTPException, BackgroundTasks
+from typing import Dict, Any, List
+from datetime import datetime
+import nest_asyncio
+
+# Allow nested event loops in Colab
+nest_asyncio.apply()
+
+# FastAPI & Uvicorn
+from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
-from pyngrok import ngrok
 import uvicorn
-from dotenv import load_dotenv
-from datetime import datetime
-import json
 
-# === CONFIGURATION ===
-load_dotenv()
-logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")),
-    format='%(asctime)s | %(levelname)s | %(name)s | %(message)s'
+# Monitoring
+from prometheus_client import make_asgi_app, generate_latest
+from starlette.responses import Response
+
+# NGROK
+from pyngrok import ngrok, conf
+
+# Logging
+from loguru import logger
+
+# System imports
+from system import (
+    orchestrator,
+    TaskRequest,
+    TaskResponse,
+    AgentType,
+    system_health_check,
+    settings,
+    WorkflowDAG
 )
-logger = logging.getLogger(__name__)
 
-# === GLOBAL STATE ===
-class SystemState:
-    """Thread-safe global state management"""
-    def __init__(self):
-        self.model = None
-        self.tokenizer = None
-        self.pipeline = None
-        self.ngrok_url = None
-        self.system_core = None
-        self.active_connections = []
-        self.metrics = {
-            "requests_total": 0,
-            "requests_success": 0,
-            "requests_failed": 0,
-            "agents_executed": {},
-            "startup_time": datetime.utcnow().isoformat()
-        }
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-state = SystemState()
+# Configure logger
+logger.remove()
+logger.add(sys.stdout, colorize=True, format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>")
+logger.add("logs/system_{time}.log", rotation="500 MB", retention="10 days", compression="zip")
 
-# === MODEL INITIALIZATION ===
-def initialize_model():
-    """Load Qwen3-1.7B model with optimization"""
-    logger.info("🔄 Initializing Qwen3-1.7B model...")
-    
-    model_name = os.getenv("MODEL_NAME", "Qwen/Qwen3-1.7B")
-    
-    try:
-        # Load tokenizer
-        state.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            trust_remote_code=True
-        )
-        
-        # Load model with optimization
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        state.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            device_map="auto",
-            trust_remote_code=True,
-            low_cpu_mem_usage=True
-        )
-        
-        # Create pipeline
-        state.pipeline = pipeline(
-            "text-generation",
-            model=state.model,
-            tokenizer=state.tokenizer,
-            max_new_tokens=int(os.getenv("AGENT_MAX_TOKENS", "2048")),
-            temperature=float(os.getenv("AGENT_TEMPERATURE", "0.7")),
-            device=device
-        )
-        
-        logger.info(f"✅ Model loaded successfully on {device}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Model initialization failed: {e}")
-        return False
+# Security
+API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-# === FASTAPI APPLICATION ===
+async def verify_api_key(api_key: str = Security(API_KEY_HEADER)):
+    """API key validation"""
+    if api_key != settings.API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+    return api_key
+
+# ============================================================================
+# FASTAPI APPLICATION
+# ============================================================================
+
 app = FastAPI(
-    title="Elite Multi-Agent Orchestration System",
-    version="1.0.0",
-    description="Enterprise-grade AI agent framework with RAG & Airflow"
+    title="🔷 Elite Multi-Agent System",
+    description="Enterprise AI Orchestration with RAG, LangGraph & Multi-Agent Coordination",
+    version="2.0.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc"
 )
 
-# CORS Configuration
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if os.getenv("ENABLE_CORS") == "true" else [],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# === API ENDPOINTS ===
+# Prometheus metrics endpoint
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
+
+# ============================================================================
+# WEBSOCKET CONNECTION MANAGER
+# ============================================================================
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+    
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        logger.info(f"WebSocket connected. Total: {len(self.active_connections)}")
+    
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+        logger.info(f"WebSocket disconnected. Total: {len(self.active_connections)}")
+    
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception as e:
+                logger.error(f"Broadcast error: {e}")
+
+manager = ConnectionManager()
+
+# ============================================================================
+# API ENDPOINTS
+# ============================================================================
 
 @app.get("/", response_class=HTMLResponse)
-async def get_dashboard():
-    """Serve main dashboard"""
-    try:
-        with open("dashbord.html", "r") as f:
-            html_content = f.read()
-        # Inject NGROK URL
-        html_content = html_content.replace(
-            "{{API_URL}}", 
-            state.ngrok_url or f"http://localhost:{os.getenv('API_PORT', '8000')}"
-        )
-        return HTMLResponse(content=html_content)
-    except FileNotFoundError:
-        return HTMLResponse("<h1>Dashboard not found. Ensure dashbord.html exists.</h1>", status_code=404)
+async def root():
+    """Serve dashboard"""
+    dashboard_path = Path("dashboard.html")
+    if dashboard_path.exists():
+        return HTMLResponse(content=dashboard_path.read_text(), status_code=200)
+    else:
+        return HTMLResponse(content="<h1>Dashboard not found. Ensure dashboard.html exists.</h1>", status_code=404)
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "model_loaded": state.pipeline is not None,
-        "system_active": state.system_core is not None,
-        "ngrok_url": state.ngrok_url,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+@app.get("/api/health")
+async def health():
+    """System health check"""
+    return await system_health_check()
 
-@app.get("/metrics")
-async def get_metrics():
-    """Prometheus-compatible metrics"""
-    return JSONResponse(content=state.metrics)
-
-@app.post("/agent/execute")
-async def execute_agent(request: dict, background_tasks: BackgroundTasks):
-    """Execute specific agent with task"""
-    state.metrics["requests_total"] += 1
+@app.post("/api/task", response_model=TaskResponse)
+async def execute_task(task: TaskRequest, api_key: str = Depends(verify_api_key)):
+    """Execute agent task"""
+    logger.info(f"Received task: {task.task_id}")
+    
+    # Broadcast task start
+    await manager.broadcast({
+        "event": "task_started",
+        "task_id": task.task_id,
+        "description": task.description
+    })
     
     try:
-        if not state.system_core:
-            raise HTTPException(status_code=503, detail="System not initialized")
+        result = await orchestrator.execute_task(task)
         
-        agent_name = request.get("agent")
-        task = request.get("task")
+        # Broadcast task completion
+        await manager.broadcast({
+            "event": "task_completed",
+            "task_id": task.task_id,
+            "result": result.dict()
+        })
         
-        if not agent_name or not task:
-            raise HTTPException(status_code=400, detail="Missing agent or task")
-        
-        # Execute agent
-        result = await state.system_core.execute_agent(agent_name, task)
-        
-        # Update metrics
-        state.metrics["requests_success"] += 1
-        state.metrics["agents_executed"][agent_name] = \
-            state.metrics["agents_executed"].get(agent_name, 0) + 1
-        
-        return {
-            "status": "success",
-            "agent": agent_name,
-            "result": result,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
+        return result
+    
     except Exception as e:
-        state.metrics["requests_failed"] += 1
-        logger.error(f"Agent execution failed: {e}")
+        logger.error(f"Task execution error: {e}")
+        await manager.broadcast({
+            "event": "task_failed",
+            "task_id": task.task_id,
+            "error": str(e)
+        })
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/agents")
+async def list_agents():
+    """List available agents"""
+    return {
+        "agents": [
+            {
+                "type": agent_type.value,
+                "status": "active",
+                "specialty": agent.specialty
+            }
+            for agent_type, agent in orchestrator.agents.items()
+        ]
+    }
+
+@app.get("/api/dag")
+async def get_dag():
+    """Get workflow DAG definition"""
+    return WorkflowDAG.create_agent_pipeline()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket for real-time updates"""
-    await websocket.accept()
-    state.active_connections.append(websocket)
-    
+    await manager.connect(websocket)
     try:
         while True:
-            # Send periodic updates
-            await websocket.send_json({
-                "type": "metrics_update",
-                "data": state.metrics,
-                "timestamp": datetime.utcnow().isoformat()
-            })
-            await asyncio.sleep(2)
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-    finally:
-        state.active_connections.remove(websocket)
+            data = await websocket.receive_text()
+            # Echo or process
+            await websocket.send_json({"status": "received", "data": data})
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
-@app.post("/rag/query")
-async def rag_query(request: dict):
-    """RAG query endpoint"""
-    try:
-        query = request.get("query")
-        if not query:
-            raise HTTPException(status_code=400, detail="Missing query")
-        
-        result = await state.system_core.rag_pipeline.query(query)
-        
-        return {
-            "query": query,
-            "answer": result["answer"],
-            "sources": result["sources"],
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"RAG query failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# ============================================================================
+# NGROK TUNNEL
+# ============================================================================
 
-# === NGROK SETUP ===
-def setup_ngrok():
-    """Initialize NGROK tunnel"""
-    token = os.getenv("NGROK_AUTH_TOKEN")
-    if not token or token == "your_ngrok_token_here":
-        logger.warning("⚠️  NGROK token not configured. Running in local mode only.")
-        return None
+def setup_ngrok(port: int = 8000) -> str:
+    """Setup NGROK tunnel"""
+    ngrok_token = os.getenv("NGROK_AUTH_TOKEN")
     
-    try:
-        ngrok.set_auth_token(token)
-        port = int(os.getenv("API_PORT", "8000"))
-        tunnel = ngrok.connect(port, bind_tls=True)
-        url = tunnel.public_url
-        logger.info(f"🌐 NGROK tunnel established: {url}")
-        return url
-    except Exception as e:
-        logger.error(f"❌ NGROK setup failed: {e}")
-        return None
+    if ngrok_token:
+        conf.get_default().auth_token = ngrok_token
+        logger.info("NGROK token configured")
+    else:
+        logger.warning("NGROK_AUTH_TOKEN not set. Using free tier (may be unstable).")
+    
+    # Terminate existing tunnels
+    ngrok.kill()
+    
+    # Create tunnel
+    public_url = ngrok.connect(port, bind_tls=True)
+    logger.success(f"🌐 NGROK Tunnel: {public_url}")
+    
+    return public_url.public_url
 
-# === MAIN EXECUTION ===
-async def startup_event():
-    """Application startup sequence"""
-    logger.info("🚀 Starting Elite Multi-Agent System...")
-    
-    # Step 1: Initialize model
-    if not initialize_model():
-        logger.error("Model initialization failed. Exiting.")
-        sys.exit(1)
-    
-    # Step 2: Initialize system core
-    from system import SystemCore
-    state.system_core = SystemCore(state.pipeline, state.tokenizer)
-    await state.system_core.initialize()
-    
-    # Step 3: Setup NGROK
-    state.ngrok_url = setup_ngrok()
-    
-    logger.info("✅ System fully operational")
-    logger.info(f"📊 Dashboard: {state.ngrok_url or 'http://localhost:8000'}")
+# ============================================================================
+# STARTUP & SHUTDOWN
+# ============================================================================
 
 @app.on_event("startup")
-async def on_startup():
-    await startup_event()
+async def startup_event():
+    """Initialize system on startup"""
+    logger.info("🚀 Starting Elite Multi-Agent System...")
+    
+    # Create directories
+    Path("logs").mkdir(exist_ok=True)
+    Path(settings.CHROMA_PERSIST_DIR).mkdir(exist_ok=True)
+    
+    # Warm up models
+    logger.info("Warming up AI models...")
+    await system_health_check()
+    
+    logger.success("✅ System ready")
 
 @app.on_event("shutdown")
-async def on_shutdown():
-    """Graceful shutdown"""
-    logger.info("🛑 Shutting down system...")
-    if state.system_core:
-        await state.system_core.shutdown()
-    ngrok.disconnect(state.ngrok_url)
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    logger.info("Shutting down...")
+    ngrok.kill()
+
+# ============================================================================
+# MAIN LAUNCHER
+# ============================================================================
 
 def main():
-    """Main entry point"""
-    host = os.getenv("API_HOST", "0.0.0.0")
-    port = int(os.getenv("API_PORT", "8000"))
+    """Main entry point for Colab"""
     
-    uvicorn.run(
+    print("""
+    ╔═══════════════════════════════════════════════════════════════════════╗
+    ║                                                                       ║
+    ║         🔷 ELITE MULTI-AGENT ORCHESTRATION SYSTEM 🔷                  ║
+    ║                                                                       ║
+    ║  Architecture: LangGraph + RAG + Qwen3-1.7B + FastAPI               ║
+    ║  Agents: CodeArchitect | SecAnalyst | AutoBot | AgentSuite           ║
+    ║          CreativeAgent | AgCustom                                    ║
+    ║                                                                       ║
+    ╚═══════════════════════════════════════════════════════════════════════╝
+    """)
+    
+    port = 8000
+    
+    # Setup NGROK
+    try:
+        public_url = setup_ngrok(port)
+        print(f"\n✅ PUBLIC URL: {public_url}")
+        print(f"📊 Dashboard: {public_url}")
+        print(f"📖 API Docs: {public_url}/api/docs")
+        print(f"📈 Metrics: {public_url}/metrics\n")
+    except Exception as e:
+        logger.error(f"NGROK setup failed: {e}")
+        logger.warning("Running without NGROK tunnel")
+        public_url = None
+    
+    # Start server
+    config = uvicorn.Config(
         app,
-        host=host,
+        host="0.0.0.0",
         port=port,
-        log_level=os.getenv("LOG_LEVEL", "info").lower(),
+        log_level="info",
         access_log=True
     )
+    server = uvicorn.Server(config)
+    
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+    finally:
+        if public_url:
+            ngrok.kill()
 
 if __name__ == "__main__":
     main()
