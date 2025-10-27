@@ -1,98 +1,102 @@
 """
-╔═══════════════════════════════════════════════════════════════════════════╗
-║  ELITE RAG MULTI-AGENT SYSTEM - FASTAPI SERVER                            ║
-║  Production-Grade API with Full Integration Dashboard                     ║
-╚═══════════════════════════════════════════════════════════════════════════╝
+Colab Orchestration Runner
+Handles model server, ngrok tunneling, FastAPI, monitoring
 """
 
 import os
-import sys
 import asyncio
-import logging
-from pathlib import Path
-from typing import List, Optional
+import signal
+import sys
 from contextlib import asynccontextmanager
+from typing import Dict, Any
 
+# FastAPI
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+# Server
+import uvicorn
+
+# Ngrok
+from pyngrok import ngrok, conf
+
+# Monitoring
+from prometheus_client import make_asgi_app, generate_latest
+
+# Logging
+from loguru import logger
+
+# System
+from system import (
+    get_system, SystemManager, Task, AgentType, TaskPriority,
+    AGENT_REQUESTS, AGENT_LATENCY, ACTIVE_AGENTS
+)
+
+# Config
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-import uvicorn
-from pyngrok import ngrok, conf
 
-# Import system
-from system import (
-    get_agent_system,
-    get_integration_hub,
-    get_metrics,
-    config,
-    AgentType,
-    AirflowDAGManager,
-    logger
+# ==================== CONFIGURATION ====================
+class Config:
+    NGROK_AUTH_TOKEN = os.getenv("NGROK_AUTH_TOKEN")
+    PUBLIC_PORT = int(os.getenv("PUBLIC_PORT", 7860))
+    ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+
+# ==================== LOGGING SETUP ====================
+logger.remove()
+logger.add(
+    sys.stderr,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>",
+    level=Config.LOG_LEVEL
+)
+logger.add(
+    "logs/system_{time:YYYY-MM-DD}.log",
+    rotation="500 MB",
+    retention="10 days",
+    level="DEBUG"
 )
 
-# ═══════════════════════════════════════════════════════════
-# MODELS
-# ═══════════════════════════════════════════════════════════
 
-class QueryRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=5000)
-    agent: str = Field(default="CodeArchitect")
-    enable_web_search: bool = Field(default=True)
-
-class IntegrationRequest(BaseModel):
-    integration_type: str = Field(..., description="slack|n8n|zapier|manufacturing|erp")
-    data: dict
-
-class DAGRequest(BaseModel):
-    dag_type: str = Field(..., description="rag_sync|manufacturing|custom")
-
-# ═══════════════════════════════════════════════════════════
-# LIFESPAN MANAGEMENT
-# ═══════════════════════════════════════════════════════════
-
+# ==================== LIFESPAN MANAGER ====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup and shutdown logic"""
-    logger.info("🚀 STARTING ELITE RAG MULTI-AGENT SYSTEM")
-    logger.info("=" * 70)
+    """Manage application lifecycle"""
+    logger.info("🚀 Starting AI Agent Orchestration System")
     
-    # Initialize system (loads model)
-    agent_system = get_agent_system()
-    logger.info(f"✓ Agent System initialized with {len(AgentType)} agents")
+    # Setup ngrok
+    if Config.NGROK_AUTH_TOKEN:
+        conf.get_default().auth_token = Config.NGROK_AUTH_TOKEN
+        tunnel = ngrok.connect(Config.PUBLIC_PORT, bind_tls=True)
+        public_url = tunnel.public_url
+        logger.info(f"🌐 Ngrok tunnel: {public_url}")
+        app.state.public_url = public_url
+    else:
+        logger.warning("⚠️  No NGROK_AUTH_TOKEN provided")
+        app.state.public_url = f"http://localhost:{Config.PUBLIC_PORT}"
     
-    # Setup NGROK tunnel
-    if config.ngrok_auth_token and config.ngrok_auth_token != "your_ngrok_token_here":
-        try:
-            conf.get_default().auth_token = config.ngrok_auth_token
-            public_url = ngrok.connect(config.port, bind_tls=True)
-            logger.info(f"🌐 NGROK Tunnel: {public_url}")
-            logger.info(f"📊 Dashboard: {public_url}/dashboard")
-        except Exception as e:
-            logger.error(f"NGROK failed: {e}")
-    
-    logger.info("=" * 70)
-    logger.info("✓ SYSTEM READY FOR REQUESTS")
-    logger.info("=" * 70)
+    # Initialize system
+    app.state.system = get_system()
+    logger.info("✅ System initialized")
     
     yield
     
-    # Shutdown
-    logger.info("Shutting down system...")
-    ngrok.disconnect_all()
+    # Cleanup
+    logger.info("🛑 Shutting down...")
+    if Config.NGROK_AUTH_TOKEN:
+        ngrok.disconnect(tunnel.public_url)
+    await app.state.system.shutdown()
 
-# ═══════════════════════════════════════════════════════════
-# FASTAPI APP
-# ═══════════════════════════════════════════════════════════
 
+# ==================== FASTAPI APP ====================
 app = FastAPI(
-    title="Elite RAG Multi-Agent System",
-    description="Production-grade agentic RAG with LangGraph, Airflow, and full integrations",
-    version="2.0.0",
+    title="AI Agent Orchestration System",
+    description="Enterprise Multi-Agent Platform with RAG",
+    version="1.0.0",
     lifespan=lifespan
 )
 
@@ -105,228 +109,161 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ═══════════════════════════════════════════════════════════
-# ROUTES
-# ═══════════════════════════════════════════════════════════
+# Prometheus metrics
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
 
+
+# ==================== WEBSOCKET MANAGER ====================
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        logger.info(f"WebSocket connected. Total: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+        logger.info(f"WebSocket disconnected. Total: {len(self.active_connections)}")
+
+    async def broadcast(self, message: Dict):
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except:
+                pass
+
+
+manager = ConnectionManager()
+
+
+# ==================== API ENDPOINTS ====================
 @app.get("/", response_class=HTMLResponse)
-async def root():
-    """Redirect to dashboard"""
-    return """
-    <html>
-        <head>
-            <meta http-equiv="refresh" content="0; url=/dashboard">
-        </head>
-        <body>
-            <p>Redirecting to dashboard...</p>
-        </body>
-    </html>
-    """
-
-@app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    """Serve main dashboard"""
-    dashboard_path = Path(__file__).parent / "dashboard.html"
-    if dashboard_path.exists():
-        return HTMLResponse(content=dashboard_path.read_text(), status_code=200)
-    else:
-        return HTMLResponse(content="<h1>Dashboard not found</h1>", status_code=404)
+    """Serve dashboard"""
+    with open("dashboard.html", "r") as f:
+        return HTMLResponse(content=f.read())
+
 
 @app.get("/health")
-async def health():
-    """Health check"""
-    agent_system = get_agent_system()
-    return {
-        "status": "operational",
-        "model": config.model_name,
-        "device": agent_system.llm.device,
-        "vector_db_docs": agent_system.rag.vectorstore._collection.count(),
-        "agents_available": [a.value for a in AgentType],
-        "integrations": {
-            "slack": bool(config.slack_bot_token),
-            "notion": bool(config.notion_token),
-            "github": bool(config.github_token),
-            "manufacturing": bool(config.printer_3d_api_url),
-            "erp": bool(config.erp_system_url)
-        }
-    }
+async def health_check():
+    """Health check endpoint"""
+    system: SystemManager = app.state.system
+    metrics = system.get_system_metrics()
+    return JSONResponse({
+        "status": "healthy",
+        "environment": Config.ENVIRONMENT,
+        "public_url": app.state.public_url,
+        "metrics": metrics
+    })
 
-@app.post("/query")
-async def process_query(request: QueryRequest, background_tasks: BackgroundTasks):
-    """Execute agent query"""
+
+@app.post("/api/v1/task")
+async def submit_task(task_data: Dict[str, Any]):
+    """Submit task to agent system"""
     try:
-        agent_system = get_agent_system()
+        task = Task(
+            description=task_data.get("description", ""),
+            agent_type=AgentType(task_data["agent_type"]) if task_data.get("agent_type") else None,
+            priority=TaskPriority(task_data.get("priority", "medium")),
+            context=task_data.get("context", {})
+        )
         
-        # Validate agent type
-        if request.agent not in [a.value for a in AgentType]:
-            raise HTTPException(status_code=400, detail=f"Invalid agent: {request.agent}")
+        system: SystemManager = app.state.system
+        result = await system.submit_task(task)
         
-        # Execute workflow
-        result = await agent_system.run(request.query, request.agent)
+        # Broadcast to WebSocket clients
+        await manager.broadcast({
+            "type": "task_completed",
+            "data": result
+        })
         
-        # Log to MLflow in background
-        if config.mlflow_tracking_uri:
-            background_tasks.add_task(log_to_mlflow, result)
-        
-        return JSONResponse(content=result)
+        return JSONResponse(result)
         
     except Exception as e:
-        logger.error(f"Query failed: {e}")
+        logger.error(f"Task submission error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/integration/trigger")
-async def trigger_integration(request: IntegrationRequest):
-    """Trigger external integration"""
-    try:
-        hub = get_integration_hub()
-        
-        result = None
-        if request.integration_type == "slack":
-            hub.send_slack_message(
-                channel=request.data.get('channel', '#general'),
-                message=request.data.get('message', '')
-            )
-            result = {"status": "sent"}
-            
-        elif request.integration_type == "n8n":
-            hub.trigger_n8n_workflow(request.data)
-            result = {"status": "triggered"}
-            
-        elif request.integration_type == "zapier":
-            hub.trigger_zapier_zap(request.data)
-            result = {"status": "triggered"}
-            
-        elif request.integration_type == "manufacturing":
-            result = hub.send_to_manufacturing(request.data)
-            
-        elif request.integration_type == "erp":
-            result = hub.update_erp_system(request.data)
-        
-        else:
-            raise HTTPException(status_code=400, detail="Unknown integration type")
-        
-        return {"integration": request.integration_type, "result": result}
-        
-    except Exception as e:
-        logger.error(f"Integration failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/airflow/dags")
-async def list_dags():
-    """List available Airflow DAGs"""
-    return {
-        "dags": [
-            {"name": "rag_sync", "description": "RAG knowledge base sync"},
-            {"name": "manufacturing", "description": "Manufacturing pipeline"},
-        ]
-    }
-
-@app.post("/airflow/dag/generate")
-async def generate_dag(request: DAGRequest):
-    """Generate Airflow DAG code"""
-    try:
-        manager = AirflowDAGManager()
-        
-        if request.dag_type == "rag_sync":
-            dag_code = manager.generate_rag_sync_dag()
-        elif request.dag_type == "manufacturing":
-            dag_code = manager.generate_manufacturing_dag()
-        else:
-            raise HTTPException(status_code=400, detail="Unknown DAG type")
-        
-        return PlainTextResponse(content=dag_code, media_type="text/plain")
-        
-    except Exception as e:
-        logger.error(f"DAG generation failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/metrics")
-async def metrics():
-    """Prometheus metrics endpoint"""
-    return PlainTextResponse(content=get_metrics(), media_type="text/plain")
-
-@app.get("/agents")
+@app.get("/api/v1/agents")
 async def list_agents():
     """List available agents"""
-    agents = []
-    for agent in AgentType:
-        agents.append({
-            "name": agent.value,
-            "description": {
-                "CodeArchitect": "Software engineering & system design",
-                "SecAnalyst": "Security analysis & penetration testing",
-                "AutoBot": "Automation & API workflows",
-                "AgentSuite": "Administrative & operational management",
-                "CreativeAgent": "Content creation & creative writing",
-                "AgCustom": "Custom AI agent solutions"
-            }[agent.value]
-        })
-    return {"agents": agents}
+    return JSONResponse({
+        "agents": [
+            {
+                "type": agent.value,
+                "description": agent.name
+            }
+            for agent in AgentType
+        ]
+    })
 
-@app.post("/web-scrape")
-async def web_scrape(query: str, max_results: int = 10):
-    """Manually trigger web scraping"""
+
+@app.get("/api/v1/metrics")
+async def get_metrics():
+    """Get system metrics"""
+    system: SystemManager = app.state.system
+    return JSONResponse(system.get_system_metrics())
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket for real-time updates"""
+    await manager.connect(websocket)
     try:
-        agent_system = get_agent_system()
-        documents = agent_system.rag.ingest_web_content(query)
+        while True:
+            data = await websocket.receive_text()
+            # Echo for heartbeat
+            await websocket.send_json({"type": "pong", "data": data})
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+
+@app.post("/api/v1/rag/build")
+async def build_knowledge_base(data: Dict[str, Any]):
+    """Build RAG knowledge base from query"""
+    try:
+        system: SystemManager = app.state.system
+        query = data.get("query", "")
         
-        return {
-            "query": query,
-            "documents_scraped": len(documents),
-            "sources": [doc.metadata['source'] for doc in documents[:5]]
-        }
+        await system.orchestrator.rag.build_knowledge_base(query)
         
+        return JSONResponse({
+            "status": "success",
+            "message": f"Knowledge base built for: {query}"
+        })
     except Exception as e:
-        logger.error(f"Scraping failed: {e}")
+        logger.error(f"RAG build error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/vector-db/stats")
-async def vector_db_stats():
-    """Vector database statistics"""
-    agent_system = get_agent_system()
-    return {
-        "total_documents": agent_system.rag.vectorstore._collection.count(),
-        "embedding_model": config.embedding_model,
-        "chunk_size": config.chunk_size,
-        "top_k": config.top_k
-    }
 
-# ═══════════════════════════════════════════════════════════
-# BACKGROUND TASKS
-# ═══════════════════════════════════════════════════════════
+# ==================== SIGNAL HANDLERS ====================
+def signal_handler(signum, frame):
+    """Handle shutdown signals"""
+    logger.info(f"Received signal {signum}")
+    sys.exit(0)
 
-def log_to_mlflow(result: dict):
-    """Log query results to MLflow"""
-    try:
-        import mlflow
-        mlflow.set_tracking_uri(config.mlflow_tracking_uri)
-        
-        with mlflow.start_run():
-            mlflow.log_param("agent", result['agent'])
-            mlflow.log_param("query", result['query'][:100])
-            mlflow.log_metric("confidence", result['confidence'])
-            mlflow.log_metric("sources_used", len(result['sources']))
-            mlflow.log_metric("iterations", result['iterations'])
-        
-        logger.info("Logged to MLflow")
-    except Exception as e:
-        logger.error(f"MLflow logging failed: {e}")
 
-# ═══════════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════════
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
+
+# ==================== MAIN ====================
 def main():
-    """Launch the system"""
-    logger.info("Starting FastAPI server...")
+    """Run the server"""
+    logger.info(f"🔥 Starting server on port {Config.PUBLIC_PORT}")
     
     uvicorn.run(
         app,
-        host=config.host,
-        port=config.port,
-        log_level=config.log_level.lower(),
-        access_log=True
+        host="0.0.0.0",
+        port=Config.PUBLIC_PORT,
+        log_level=Config.LOG_LEVEL.lower(),
+        access_log=True,
+        workers=1  # Single worker for Colab
     )
+
 
 if __name__ == "__main__":
     main()
