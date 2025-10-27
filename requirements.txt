@@ -1,63 +1,44 @@
-# Core AI Framework
+# Core AI & LLM
 langchain
-langgraph
 langchain-community
-langchain-huggingface
-
-# LLM & Embeddings
+langchain-core
+langgraph
 transformers
 torch
 sentence-transformers
-accelerate
-bitsandbytes
+huggingface-hub
 
-# Vector Store & RAG
+# Vector Store & Embeddings
 faiss-cpu
 chromadb
 
 # Web Scraping & Data
 beautifulsoup4
 requests
+lxml
 playwright
-httpx
-aiohttp
 
-# API & Server
+# API Framework
 fastapi
 uvicorn
-websockets
 pydantic
 pydantic-settings
 
 # Workflow Orchestration
 apache-airflow
-celery
-redis
+apache-airflow-providers-http
 
-# Monitoring & Metrics
+# Monitoring & Logging
 prometheus-client
-grafana-api
-
-
-# Data Processing
-pandas
-numpy
-pyarrow
-
-# Integrations
-slack-sdk
-notion-client
-pygithub
+python-json-logger
 
 # Utilities
 python-dotenv
 pyngrok
-loguru
+aiohttp
 tenacity
-pyyaml
-jsonschema
+jinja2
 
 # Security
 cryptography
 python-jose[cryptography]
-passlib[bcrypt]
