@@ -1,97 +1,63 @@
-# ═══════════════════════════════════════════════════════════
-# CORE FRAMEWORK
-# ═══════════════════════════════════════════════════════════
-fastapi
-uvicorn
-pyngrok
-pydantic
-pydantic-settings
-python-dotenv
-python-multipart
+# Core AI Framework
+langchain
+langgraph
+langchain-community
+langchain-huggingface
 
-# ═══════════════════════════════════════════════════════════
-# LLM & AI STACK
-# ═══════════════════════════════════════════════════════════
+# LLM & Embeddings
 transformers
 torch
+sentence-transformers
 accelerate
 bitsandbytes
-sentencepiece
-protobuf
 
-# ═══════════════════════════════════════════════════════════
-# LANGCHAIN + LANGGRAPH ECOSYSTEM
-# ═══════════════════════════════════════════════════════════
-langchain
-langchain-community
-langchain-core
-langgraph
-langsmith
-
-# ═══════════════════════════════════════════════════════════
-# VECTOR STORES & EMBEDDINGS
-# ═══════════════════════════════════════════════════════════
-chromadb
+# Vector Store & RAG
 faiss-cpu
-sentence-transformers
-qdrant-client
+chromadb
 
-# ═══════════════════════════════════════════════════════════
-# WEB SCRAPING & HTTP
-# ═══════════════════════════════════════════════════════════
+# Web Scraping & Data
 beautifulsoup4
-lxml
 requests
-httpx
-selenium
 playwright
-fake-useragent
+httpx
+aiohttp
 
-# ═══════════════════════════════════════════════════════════
-# WORKFLOW ORCHESTRATION
-# ═══════════════════════════════════════════════════════════
+# API & Server
+fastapi
+uvicorn
+websockets
+pydantic
+pydantic-settings
+
+# Workflow Orchestration
 apache-airflow
-apache-airflow-providers-http
 celery
 redis
 
-# ═══════════════════════════════════════════════════════════
-# INTEGRATIONS & CONNECTORS
-# ═══════════════════════════════════════════════════════════
+# Monitoring & Metrics
+prometheus-client
+grafana-api
+
+
+# Data Processing
+pandas
+numpy
+pyarrow
+
+# Integrations
 slack-sdk
 notion-client
-PyGithub
-confluent-kafka
-boto3
-airbyte-api
+pygithub
 
-# ═══════════════════════════════════════════════════════════
-# MONITORING & OBSERVABILITY
-# ═══════════════════════════════════════════════════════════
-prometheus-client
-prometheus-fastapi-instrumentator
-grafana-client
-opentelemetry-api
-opentelemetry-sdk
+# Utilities
+python-dotenv
+pyngrok
+loguru
+tenacity
+pyyaml
+jsonschema
 
-# ═══════════════════════════════════════════════════════════
-# MODEL MANAGEMENT & MLOPS
-# ═══════════════════════════════════════════════════════════
-mlflow
-wandb
-
-# ═══════════════════════════════════════════════════════════
-# DATA PROCESSING & UTILITIES
-# ═══════════════════════════════════════════════════════════
-numpy
-pandas
-pillow
-aiofiles
+# Security
 cryptography
-jinja2
-
-# ═══════════════════════════════════════════════════════════
-# TESTING & QUALITY
-# ═══════════════════════════════════════════════════════════
-pytest
-pytest-asyncio
+python-jose[cryptography]
+passlib[bcrypt]
