@@ -28,7 +28,6 @@ from langchain.prompts import PromptTemplate
 from langchain_community.vectorstores import Chroma
 from langchain.schema import Document
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolExecutor
 from langgraph.checkpoint.memory import MemorySaver
 
 # ML/AI
@@ -56,7 +55,7 @@ import time
 class Settings(BaseSettings):
     """Enterprise configuration with validation"""
     # Model
-    MODEL_NAME: str = "Qwen/Qwen3-1.7B"
+    MODEL_NAME: str = "Qwen/Qwen2.5-1.5B-Instruct"
     MODEL_DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
     MODEL_QUANTIZATION: str = "8bit"
     MAX_NEW_TOKENS: int = 2048
@@ -79,6 +78,7 @@ class Settings(BaseSettings):
     
     class Config:
         env_file = ".env"
+        extra = "allow"
 
 settings = Settings()
 
@@ -179,54 +179,89 @@ class ModelManager:
         """Load Qwen model with quantization"""
         logger.info(f"Loading model: {settings.MODEL_NAME} on {settings.MODEL_DEVICE}")
         
-        quantization_config = None
-        if settings.MODEL_QUANTIZATION == "8bit":
-            quantization_config = BitsAndBytesConfig(
-                load_in_8bit=True,
-                llm_int8_threshold=6.0
+        try:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                settings.MODEL_NAME,
+                trust_remote_code=True
             )
-        
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            settings.MODEL_NAME,
-            trust_remote_code=True
-        )
-        
-        self._model = AutoModelForCausalLM.from_pretrained(
-            settings.MODEL_NAME,
-            quantization_config=quantization_config,
-            device_map="auto",
-            trust_remote_code=True,
-            torch_dtype=torch.float16 if settings.MODEL_DEVICE == "cuda" else torch.float32
-        )
-        
-        logger.success(f"Model loaded successfully on {settings.MODEL_DEVICE}")
+            
+            # Determine device and quantization
+            if settings.MODEL_DEVICE == "cuda" and torch.cuda.is_available():
+                if settings.MODEL_QUANTIZATION == "8bit":
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_8bit=True,
+                        llm_int8_threshold=6.0
+                    )
+                    self._model = AutoModelForCausalLM.from_pretrained(
+                        settings.MODEL_NAME,
+                        quantization_config=quantization_config,
+                        device_map="auto",
+                        trust_remote_code=True,
+                        torch_dtype=torch.float16
+                    )
+                else:
+                    self._model = AutoModelForCausalLM.from_pretrained(
+                        settings.MODEL_NAME,
+                        device_map="auto",
+                        trust_remote_code=True,
+                        torch_dtype=torch.float16
+                    )
+            else:
+                # CPU mode
+                self._model = AutoModelForCausalLM.from_pretrained(
+                    settings.MODEL_NAME,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float32
+                )
+                self._model = self._model.to('cpu')
+            
+            logger.success(f"Model loaded successfully on {settings.MODEL_DEVICE}")
+            
+        except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+            raise
     
     def _load_embeddings(self):
         """Load embedding model"""
-        self._embeddings = HuggingFaceEmbeddings(
-            model_name=settings.EMBEDDING_MODEL,
-            model_kwargs={'device': settings.MODEL_DEVICE}
-        )
-        logger.success("Embeddings loaded successfully")
+        try:
+            self._embeddings = HuggingFaceEmbeddings(
+                model_name=settings.EMBEDDING_MODEL,
+                model_kwargs={'device': settings.MODEL_DEVICE}
+            )
+            logger.success("Embeddings loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load embeddings: {e}")
+            raise
     
     def generate(self, prompt: str, max_tokens: int = None) -> str:
         """Generate text with the model"""
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(settings.MODEL_DEVICE)
-        
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_tokens or settings.MAX_NEW_TOKENS,
-                temperature=settings.TEMPERATURE,
-                do_sample=True,
-                top_p=0.9,
-                pad_token_id=self.tokenizer.eos_token_id
-            )
-        
-        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        # Remove the prompt from response
-        response = response[len(prompt):].strip()
-        return response
+        try:
+            inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+            
+            # Move to correct device
+            if settings.MODEL_DEVICE == "cuda" and torch.cuda.is_available():
+                inputs = {k: v.to('cuda') for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_tokens or settings.MAX_NEW_TOKENS,
+                    temperature=settings.TEMPERATURE,
+                    do_sample=True,
+                    top_p=0.9,
+                    pad_token_id=self.tokenizer.eos_token_id
+                )
+            
+            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # Remove the prompt from response
+            if prompt in response:
+                response = response.replace(prompt, "").strip()
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Generation error: {e}")
+            return f"[ERROR] Failed to generate response: {str(e)}"
 
 model_manager = ModelManager()
 
@@ -238,22 +273,29 @@ class RAGSystem:
     """Real-time RAG with web scraping"""
     
     def __init__(self):
-        self.embeddings = model_manager.embeddings
+        self.embeddings = None
         self.vectorstore = None
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=settings.CHUNK_SIZE,
             chunk_overlap=settings.CHUNK_OVERLAP
         )
-        self._init_vectorstore()
+        self._initialized = False
     
-    def _init_vectorstore(self):
-        """Initialize or load vector store"""
-        self.vectorstore = Chroma(
-            persist_directory=settings.CHROMA_PERSIST_DIR,
-            embedding_function=self.embeddings,
-            collection_name="elite_agents_kb"
-        )
-        logger.info("Vector store initialized")
+    def _ensure_initialized(self):
+        """Lazy initialization"""
+        if not self._initialized:
+            try:
+                self.embeddings = model_manager.embeddings
+                self.vectorstore = Chroma(
+                    persist_directory=settings.CHROMA_PERSIST_DIR,
+                    embedding_function=self.embeddings,
+                    collection_name="elite_agents_kb"
+                )
+                self._initialized = True
+                logger.info("RAG system initialized")
+            except Exception as e:
+                logger.error(f"RAG initialization error: {e}")
+                raise
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     async def scrape_google_cse(self, query: str, num_results: int = 5) -> List[str]:
@@ -263,58 +305,58 @@ class RAGSystem:
         search_url = f"https://cse.google.com/cse?cx={settings.GOOGLE_CSE_ID}&q={quote_plus(query)}"
         
         try:
-            async with httpx.AsyncClient(timeout=settings.SCRAPE_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=settings.SCRAPE_TIMEOUT, follow_redirects=True) as client:
                 response = await client.get(search_url, headers={
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 })
                 response.raise_for_status()
                 
-                soup = BeautifulSoup(response.text, 'lxml')
+                soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # Extract search results
+                # Extract search results - multiple selectors for robustness
                 results = []
-                for result in soup.find_all('div', class_='gs-webResult')[:num_results]:
-                    link_tag = result.find('a', class_='gs-title')
-                    snippet_tag = result.find('div', class_='gs-snippet')
-                    
-                    if link_tag and snippet_tag:
-                        url = link_tag.get('href')
-                        snippet = snippet_tag.get_text(strip=True)
-                        
-                        # Scrape full content
-                        content = await self._scrape_page(url)
-                        if content:
-                            results.append(content)
                 
-                # Fallback: direct search result scraping
-                if not results:
-                    for link in soup.find_all('a', href=True)[:num_results]:
-                        url = link['href']
+                # Method 1: Standard result divs
+                for result in soup.find_all('div', class_='g')[:num_results]:
+                    link_tag = result.find('a')
+                    if link_tag and link_tag.get('href'):
+                        url = link_tag['href']
                         if url.startswith('http'):
                             content = await self._scrape_page(url)
                             if content:
                                 results.append(content)
                 
+                # Method 2: Fallback - any links
+                if not results:
+                    for link in soup.find_all('a', href=True)[:num_results * 2]:
+                        url = link['href']
+                        if url.startswith('http') and 'google' not in url:
+                            content = await self._scrape_page(url)
+                            if content:
+                                results.append(content)
+                            if len(results) >= num_results:
+                                break
+                
                 logger.success(f"Scraped {len(results)} pages")
-                return results
+                return results if results else [f"Search results for: {query}"]
                 
         except Exception as e:
             logger.error(f"Scraping error: {e}")
-            return []
+            return [f"Unable to scrape live data. Query context: {query}"]
     
     async def _scrape_page(self, url: str) -> Optional[str]:
         """Scrape individual page content"""
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
                 response = await client.get(url, headers={
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 })
                 response.raise_for_status()
                 
-                soup = BeautifulSoup(response.text, 'lxml')
+                soup = BeautifulSoup(response.text, 'html.parser')
                 
                 # Remove scripts and styles
-                for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
+                for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
                     tag.decompose()
                 
                 # Extract text
@@ -324,7 +366,7 @@ class RAGSystem:
                 text = re.sub(r'\n+', '\n', text)
                 text = re.sub(r'\s+', ' ', text)
                 
-                return text[:5000]  # Limit size
+                return text[:5000] if text else None
                 
         except Exception as e:
             logger.warning(f"Failed to scrape {url}: {e}")
@@ -332,31 +374,38 @@ class RAGSystem:
     
     async def ingest_and_retrieve(self, query: str) -> List[str]:
         """Real-time scraping and retrieval"""
+        self._ensure_initialized()
         rag_retrievals.inc()
         
         # Scrape fresh data
-        scraped_content = await self.scrape_google_cse(query, num_results=settings.MAX_SCRAPE_PAGES)
+        scraped_content = await self.scrape_google_cse(query, num_results=min(settings.MAX_SCRAPE_PAGES, 5))
         
-        if scraped_content:
+        if scraped_content and len(scraped_content) > 0:
             # Split and embed
             docs = []
             for content in scraped_content:
-                chunks = self.text_splitter.split_text(content)
-                docs.extend([Document(page_content=chunk) for chunk in chunks])
+                if content and len(content) > 50:  # Valid content
+                    chunks = self.text_splitter.split_text(content)
+                    docs.extend([Document(page_content=chunk) for chunk in chunks])
             
             # Add to vector store
             if docs:
-                self.vectorstore.add_documents(docs)
-                logger.info(f"Added {len(docs)} chunks to vector store")
+                try:
+                    self.vectorstore.add_documents(docs)
+                    logger.info(f"Added {len(docs)} chunks to vector store")
+                except Exception as e:
+                    logger.error(f"Vector store error: {e}")
         
         # Retrieve relevant context
-        retriever = self.vectorstore.as_retriever(search_kwargs={"k": settings.TOP_K_RETRIEVAL})
-        retrieved_docs = retriever.get_relevant_documents(query)
-        
-        context = [doc.page_content for doc in retrieved_docs]
-        logger.info(f"Retrieved {len(context)} relevant chunks")
-        
-        return context
+        try:
+            retriever = self.vectorstore.as_retriever(search_kwargs={"k": settings.TOP_K_RETRIEVAL})
+            retrieved_docs = retriever.get_relevant_documents(query)
+            context = [doc.page_content for doc in retrieved_docs]
+            logger.info(f"Retrieved {len(context)} relevant chunks")
+            return context if context else [f"Context: {query}"]
+        except Exception as e:
+            logger.error(f"Retrieval error: {e}")
+            return [f"Context: {query}"]
 
 rag_system = RAGSystem()
 
@@ -376,7 +425,7 @@ class BaseAgent:
         """Build specialized prompt"""
         
         context_str = ""
-        if context:
+        if context and len(context) > 0:
             context_str = "\n\n**RETRIEVED CONTEXT:**\n" + "\n---\n".join(context[:3])
         
         prompt = f"""You are {self.agent_type.value}, an elite AI specialist in {self.specialty}.
@@ -394,11 +443,11 @@ class BaseAgent:
     async def execute(self, task: str, context: List[str] = None) -> Dict[str, Any]:
         """Execute agent task"""
         start_time = time.time()
-        agent_requests.inc(labels=[self.agent_type.value])
+        agent_requests.labels(agent_type=self.agent_type.value).inc()
         
         try:
             prompt = self._build_prompt(task, context)
-            response = model_manager.generate(prompt)
+            response = model_manager.generate(prompt, max_tokens=1024)
             
             execution_time = time.time() - start_time
             agent_latency.labels(agent_type=self.agent_type.value).observe(execution_time)
@@ -506,8 +555,12 @@ class AgentOrchestrator:
         task = state["task"]
         
         if task.require_rag:
-            context = await rag_system.ingest_and_retrieve(task.description)
-            state["rag_context"] = context
+            try:
+                context = await rag_system.ingest_and_retrieve(task.description)
+                state["rag_context"] = context
+            except Exception as e:
+                logger.error(f"RAG error: {e}")
+                state["rag_context"] = []
         else:
             state["rag_context"] = []
         
@@ -521,18 +574,18 @@ class AgentOrchestrator:
         if task.agent_preference:
             selected_agent = task.agent_preference
         else:
-            # Simple keyword-based routing (can be enhanced with ML)
+            # Simple keyword-based routing
             desc_lower = task.description.lower()
             
-            if any(kw in desc_lower for kw in ["code", "api", "algorithm", "software", "develop"]):
+            if any(kw in desc_lower for kw in ["code", "api", "algorithm", "software", "develop", "program", "function"]):
                 selected_agent = AgentType.CODE_ARCHITECT
-            elif any(kw in desc_lower for kw in ["security", "audit", "vulnerability", "pentest"]):
+            elif any(kw in desc_lower for kw in ["security", "audit", "vulnerability", "pentest", "threat"]):
                 selected_agent = AgentType.SEC_ANALYST
-            elif any(kw in desc_lower for kw in ["automate", "workflow", "integration", "ci/cd"]):
+            elif any(kw in desc_lower for kw in ["automate", "workflow", "integration", "ci/cd", "pipeline"]):
                 selected_agent = AgentType.AUTO_BOT
-            elif any(kw in desc_lower for kw in ["report", "financial", "admin", "schedule"]):
+            elif any(kw in desc_lower for kw in ["report", "financial", "admin", "schedule", "analyze"]):
                 selected_agent = AgentType.AGENT_SUITE
-            elif any(kw in desc_lower for kw in ["creative", "content", "design", "visual"]):
+            elif any(kw in desc_lower for kw in ["creative", "content", "design", "visual", "write"]):
                 selected_agent = AgentType.CREATIVE_AGENT
             else:
                 selected_agent = AgentType.AG_CUSTOM
@@ -603,7 +656,7 @@ class AgentOrchestrator:
                 agent_used=final_state["current_agent"],
                 result=final_state["final_output"],
                 execution_time=execution_time,
-                rag_context=[ctx[:200] for ctx in final_state["rag_context"][:3]]
+                rag_context=[ctx[:200] + "..." if len(ctx) > 200 else ctx for ctx in final_state["rag_context"][:3]]
             )
             
             logger.success(f"Task {task.task_id} completed in {execution_time:.2f}s")
@@ -611,6 +664,9 @@ class AgentOrchestrator:
             
         except Exception as e:
             logger.error(f"Task execution failed: {e}")
+            import traceback
+            traceback.print_exc()
+            
             return TaskResponse(
                 task_id=task.task_id,
                 status=TaskStatus.FAILED,
@@ -672,9 +728,10 @@ async def system_health_check() -> Dict[str, Any]:
         "status": "operational",
         "model_loaded": model_manager._model is not None,
         "embeddings_loaded": model_manager._embeddings is not None,
-        "vectorstore_initialized": rag_system.vectorstore is not None,
+        "vectorstore_initialized": rag_system._initialized,
         "agents_active": len(orchestrator.agents),
         "device": settings.MODEL_DEVICE,
+        "cuda_available": torch.cuda.is_available(),
         "timestamp": datetime.now().isoformat()
     }
 
