@@ -1,39 +1,56 @@
-# Core AI & LLM Stack
-transformers
-torch
-sentence-transformers
+# Core Framework
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+
+# LangChain Ecosystem
 langchain
 langchain-community
 langgraph
+langchain-huggingface
+
+# AI/ML
+transformers
+torch
+sentence-transformers
+accelerate
+bitsandbytes
+
+# Vector Store & RAG
 chromadb
+faiss-cpu
 
-# API & Web Framework
-fastapi
-uvicorn
-pyngrok
-websockets
-
-# Data Processing & RAG
-beautifulsoup4
+# Web Scraping
 requests
+beautifulsoup4
 lxml
-googlesearch-python
-markdownify
+playwright
 
 # Workflow Orchestration
 apache-airflow
-apache-airflow-providers-http
+celery
+redis
 
-# Vector Store & Embeddings
-faiss-cpu
+# API & Networking
+httpx
+websockets
+pyngrok
+
+# Data Processing
+pandas
 numpy
+
+# Monitoring & Logging
+prometheus-client
+loguru
+
+# Security
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
 
 # Utilities
 python-dotenv
-pydantic
-aiohttp
-httpx
-
-# Monitoring & Logging
-python-json-logger
-prometheus-client
+aiofiles
+tenacity
