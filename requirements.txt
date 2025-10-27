@@ -1,101 +1,39 @@
-# ═══════════════════════════════════════════════════════════
-# CORE FRAMEWORK
-# ═══════════════════════════════════════════════════════════
-fastapi
-uvicorn
-pyngrok
-python-dotenv
-pydantic
-pydantic-settings
-
-# ═══════════════════════════════════════════════════════════
-# LLM & AI
-# ═══════════════════════════════════════════════════════════
+# Core AI & LLM Stack
 transformers
 torch
-accelerate
-bitsandbytes
-sentencepiece
-
-# ═══════════════════════════════════════════════════════════
-# LANGCHAIN + LANGGRAPH
-# ═══════════════════════════════════════════════════════════
+sentence-transformers
 langchain
 langchain-community
 langgraph
-langchain-experimental
-
-# ═══════════════════════════════════════════════════════════
-# ORCHESTRATION - AIRFLOW
-# ═══════════════════════════════════════════════════════════
-apache-airflow
-apache-airflow-providers-http
-apache-airflow-providers-postgres
-
-# ═══════════════════════════════════════════════════════════
-# RAG & VECTOR STORES
-# ═══════════════════════════════════════════════════════════
 chromadb
-faiss-cpu
-sentence-transformers
-pypdf
-python-docx
 
-# ═══════════════════════════════════════════════════════════
-# WEB SCRAPING
-# ═══════════════════════════════════════════════════════════
+# API & Web Framework
+fastapi
+uvicorn
+pyngrok
+websockets
+
+# Data Processing & RAG
 beautifulsoup4
 requests
 lxml
-selenium
-fake-useragent
-playwright
+googlesearch-python
+markdownify
 
-# ═══════════════════════════════════════════════════════════
-# API INTEGRATIONS
-# ═══════════════════════════════════════════════════════════
-slack-sdk
-notion-client
-PyGithub
-atlassian-python-api
-zapier-platform-client
+# Workflow Orchestration
+apache-airflow
+apache-airflow-providers-http
 
-# ═══════════════════════════════════════════════════════════
-# DATA PIPELINES
-# ═══════════════════════════════════════════════════════════
-kafka-python
-boto3
-airbyte-api
-minio
+# Vector Store & Embeddings
+faiss-cpu
+numpy
 
-# ═══════════════════════════════════════════════════════════
-# MONITORING & OBSERVABILITY
-# ═══════════════════════════════════════════════════════════
-prometheus-client
-prometheus-fastapi-instrumentator
-grafana-api
-opentelemetry-api
-opentelemetry-sdk
-opentelemetry-instrumentation-fastapi
-
-# ═══════════════════════════════════════════════════════════
-# MODEL MANAGEMENT
-# ═══════════════════════════════════════════════════════════
-mlflow
-wandb
-
-# ═══════════════════════════════════════════════════════════
-# DATABASE & CACHING
-# ═══════════════════════════════════════════════════════════
-redis
-psycopg2-binary
-sqlalchemy
-
-# ═══════════════════════════════════════════════════════════
-# UTILITIES
-# ═══════════════════════════════════════════════════════════
+# Utilities
+python-dotenv
+pydantic
+aiohttp
 httpx
-aiofiles
-tenacity
-schedule
-celery
+
+# Monitoring & Logging
+python-json-logger
+prometheus-client
