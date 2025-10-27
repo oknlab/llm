@@ -1,56 +1,56 @@
-# Core Framework
-fastapi
-uvicorn
-pydantic
-pydantic-settings
-
-# LangChain Ecosystem
+# Core AI & Orchestration
 langchain
-langchain-community
 langgraph
+langchain-community
 langchain-huggingface
 
-# AI/ML
+# Model & Inference
 transformers
 torch
-sentence-transformers
 accelerate
 bitsandbytes
+sentencepiece
 
 # Vector Store & RAG
-chromadb
 faiss-cpu
+chromadb
+sentence-transformers
 
-# Web Scraping
+# Web Scraping & Data
 requests
 beautifulsoup4
 lxml
-playwright
+html2text
+googlesearch-python
+
+# API & Server
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-multipart
+websockets
 
 # Workflow Orchestration
 apache-airflow
-celery
-redis
+apache-airflow-providers-http
+pendulum
 
-# API & Networking
-httpx
-websockets
+# Tunneling & Networking
 pyngrok
-
-# Data Processing
-pandas
-numpy
 
 # Monitoring & Logging
 prometheus-client
-loguru
+psutil
 
-# Security
-python-jose[cryptography]
-passlib[bcrypt]
-python-multipart
+# Database & Caching
+sqlalchemy
+redis
+aiosqlite
 
 # Utilities
 python-dotenv
+pyyaml
 aiofiles
+httpx
 tenacity
