@@ -1,56 +1,97 @@
-# Core AI & Orchestration
-langchain
-langgraph
-langchain-community
-langchain-huggingface
+# ═══════════════════════════════════════════════════════════
+# CORE FRAMEWORK
+# ═══════════════════════════════════════════════════════════
+fastapi
+uvicorn
+pyngrok
+pydantic
+pydantic-settings
+python-dotenv
+python-multipart
 
-# Model & Inference
+# ═══════════════════════════════════════════════════════════
+# LLM & AI STACK
+# ═══════════════════════════════════════════════════════════
 transformers
 torch
 accelerate
 bitsandbytes
 sentencepiece
+protobuf
 
-# Vector Store & RAG
-faiss-cpu
+# ═══════════════════════════════════════════════════════════
+# LANGCHAIN + LANGGRAPH ECOSYSTEM
+# ═══════════════════════════════════════════════════════════
+langchain
+langchain-community
+langchain-core
+langgraph
+langsmith
+
+# ═══════════════════════════════════════════════════════════
+# VECTOR STORES & EMBEDDINGS
+# ═══════════════════════════════════════════════════════════
 chromadb
+faiss-cpu
 sentence-transformers
+qdrant-client
 
-# Web Scraping & Data
-requests
+# ═══════════════════════════════════════════════════════════
+# WEB SCRAPING & HTTP
+# ═══════════════════════════════════════════════════════════
 beautifulsoup4
 lxml
-html2text
-googlesearch-python
+requests
+httpx
+selenium
+playwright
+fake-useragent
 
-# API & Server
-fastapi
-uvicorn[standard]
-pydantic
-pydantic-settings
-python-multipart
-websockets
-
-# Workflow Orchestration
+# ═══════════════════════════════════════════════════════════
+# WORKFLOW ORCHESTRATION
+# ═══════════════════════════════════════════════════════════
 apache-airflow
 apache-airflow-providers-http
-pendulum
-
-# Tunneling & Networking
-pyngrok
-
-# Monitoring & Logging
-prometheus-client
-psutil
-
-# Database & Caching
-sqlalchemy
+celery
 redis
-aiosqlite
 
-# Utilities
-python-dotenv
-pyyaml
+# ═══════════════════════════════════════════════════════════
+# INTEGRATIONS & CONNECTORS
+# ═══════════════════════════════════════════════════════════
+slack-sdk
+notion-client
+PyGithub
+confluent-kafka
+boto3
+airbyte-api
+
+# ═══════════════════════════════════════════════════════════
+# MONITORING & OBSERVABILITY
+# ═══════════════════════════════════════════════════════════
+prometheus-client
+prometheus-fastapi-instrumentator
+grafana-client
+opentelemetry-api
+opentelemetry-sdk
+
+# ═══════════════════════════════════════════════════════════
+# MODEL MANAGEMENT & MLOPS
+# ═══════════════════════════════════════════════════════════
+mlflow
+wandb
+
+# ═══════════════════════════════════════════════════════════
+# DATA PROCESSING & UTILITIES
+# ═══════════════════════════════════════════════════════════
+numpy
+pandas
+pillow
 aiofiles
-httpx
-tenacity
+cryptography
+jinja2
+
+# ═══════════════════════════════════════════════════════════
+# TESTING & QUALITY
+# ═══════════════════════════════════════════════════════════
+pytest
+pytest-asyncio
