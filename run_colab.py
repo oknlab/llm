@@ -1,336 +1,106 @@
-"""
-ELITE AI PLATFORM - COLAB RUNTIME
-Production deployment with FastAPI + NGROK + Dashboard
-"""
-
 import os
-import sys
-import asyncio
-import signal
-from pathlib import Path
-from typing import Optional
-from contextlib import asynccontextmanager
-import time
 import subprocess
-import json
-
-# FastAPI
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+import threading
+import time
+import requests
+from dotenv import load_dotenv
+from pyngrok import ngrok
 import uvicorn
 
-# Environment & Logging
-from dotenv import load_dotenv
-from loguru import logger
+from system import get_app
 
-# System imports
-from system import (
-    get_orchestrator,
-    get_metrics,
-    Config,
-    AgentOrchestrator
-)
-
-# NGROK
-from pyngrok import ngrok, conf
-
-# ============================================
-# CONFIGURATION
-# ============================================
-
-load_dotenv()
-
-logger.add(
-    "logs/platform_{time}.log",
-    rotation="500 MB",
-    retention="10 days",
-    level=os.getenv("LOG_LEVEL", "INFO")
-)
-
-# ============================================
-# PYDANTIC MODELS
-# ============================================
-
-class QueryRequest(BaseModel):
-    """User query request"""
-    query: str = Field(..., min_length=1, max_length=5000, description="User query")
-    agent: Optional[str] = Field(None, description="Specific agent to use")
-    enable_rag: bool = Field(True, description="Enable RAG retrieval")
-
-
-class CustomAgentRequest(BaseModel):
-    """Custom agent creation request"""
-    name: str = Field(..., min_length=1, max_length=100)
-    description: str = Field(..., min_length=1, max_length=500)
-    capabilities: list[str] = Field(..., min_items=1)
-    system_prompt: str = Field(..., min_length=1, max_length=2000)
-
-
-class QueryResponse(BaseModel):
-    """Query response"""
-    status: str
-    output: Optional[str] = None
-    agents_used: Optional[list[str]] = None
-    iterations: Optional[int] = None
-    rag_context_used: Optional[bool] = None
-    error: Optional[str] = None
-    processing_time: Optional[float] = None
-
-
-# ============================================
-# LIFESPAN MANAGEMENT
-# ============================================
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Manage application lifespan"""
-    logger.info("🚀 Starting Elite AI Platform...")
+def setup_environment():
+    """Load environment variables from .env file."""
+    load_dotenv()
+    print("--- INFO: Environment variables loaded. ---")
     
-    # Initialize orchestrator
-    orchestrator = get_orchestrator()
-    logger.info("✅ Agent orchestrator initialized")
-    
-    # Start vLLM server
-    vllm_process = start_vllm_server()
-    
-    # Setup NGROK
-    ngrok_url = setup_ngrok()
-    logger.info(f"🌐 Public URL: {ngrok_url}")
-    
-    yield
-    
-    # Cleanup
-    logger.info("🛑 Shutting down...")
-    if vllm_process:
-        vllm_process.terminate()
-    ngrok.kill()
+    token = os.getenv("NGROK_AUTH_TOKEN")
+    if not token or token == "YOUR_NGROK_AUTH_TOKEN":
+        raise ValueError("NGROK_AUTH_TOKEN is not set in the .env file. Please add it.")
+    ngrok.set_auth_token(token)
 
+def start_vllm_server():
+    """Starts the vLLM OpenAI-compatible server in a background thread."""
+    model_id = os.getenv("MODEL_ID")
+    command = [
+        "python", "-m", "vllm.entrypoints.openai.api_server",
+        "--model", model_id,
+        "--host", "127.0.0.1",
+        "--port", "8000",
+        "--trust-remote-code" # Required for some models like Qwen
+    ]
 
-# ============================================
-# FASTAPI APPLICATION
-# ============================================
+    def run():
+        print(f"--- INFO: Starting vLLM server for model: {model_id} ---")
+        # Using Popen to not block and capture output for debugging if needed
+        server_process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        # You can optionally log the server output
+        for line in iter(server_process.stdout.readline, b''):
+            print(f"[vLLM Server]: {line.decode().strip()}")
+        
+    thread = threading.Thread(target=run)
+    thread.daemon = True
+    thread.start()
+    print("--- INFO: vLLM server thread started. ---")
 
-app = FastAPI(
-    title="Elite Multi-Agent AI Platform",
-    description="Enterprise-grade custom AI agent creation platform",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ============================================
-# ROUTES
-# ============================================
-
-@app.get("/", response_class=HTMLResponse)
-async def dashboard():
-    """Serve main dashboard"""
-    dashboard_path = Path("dashboard.html")
-    if not dashboard_path.exists():
-        return HTMLResponse("<h1>Dashboard not found</h1>", status_code=404)
-    
-    return HTMLResponse(dashboard_path.read_text())
-
-
-@app.post("/api/query", response_model=QueryResponse)
-async def process_query(request: QueryRequest, background_tasks: BackgroundTasks):
-    """Process user query through multi-agent system"""
+    # Health check to ensure the server is ready before proceeding
+    health_url = "http://127.0.0.1:8000/health"
+    max_wait = 300 # 5 minutes
     start_time = time.time()
+    while time.time() - start_time < max_wait:
+        try:
+            response = requests.get(health_url, timeout=5)
+            if response.status_code == 200:
+                print("--- SUCCESS: vLLM server is healthy and ready. ---")
+                return
+        except requests.ConnectionError:
+            print("--- INFO: Waiting for vLLM server to be ready... ---")
+            time.sleep(10)
     
-    try:
-        orchestrator = get_orchestrator()
-        metrics = get_metrics()
-        
-        # Process query
-        result = orchestrator.process(request.query)
-        
-        processing_time = time.time() - start_time
-        
-        # Record metrics
-        if result.get("agents_used"):
-            for agent in result["agents_used"]:
-                metrics.record_request(agent, processing_time)
-        
-        return QueryResponse(
-            status=result["status"],
-            output=result.get("output"),
-            agents_used=result.get("agents_used"),
-            iterations=result.get("iterations"),
-            rag_context_used=result.get("rag_context_used"),
-            error=result.get("error"),
-            processing_time=processing_time
-        )
-        
-    except Exception as e:
-        logger.error(f"Query processing failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    raise RuntimeError("vLLM server failed to start within the time limit.")
 
-
-@app.post("/api/agents/create")
-async def create_custom_agent(request: CustomAgentRequest):
-    """Create custom AI agent"""
-    try:
-        orchestrator = get_orchestrator()
-        
-        result = orchestrator.create_custom_agent(
-            name=request.name,
-            description=request.description,
-            capabilities=request.capabilities,
-            system_prompt=request.system_prompt
-        )
-        
-        if result["status"] == "success":
-            return JSONResponse(content=result, status_code=201)
-        else:
-            raise HTTPException(status_code=400, detail=result.get("error"))
-            
-    except Exception as e:
-        logger.error(f"Agent creation failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/agents")
-async def list_agents():
-    """List all available agents"""
-    try:
-        orchestrator = get_orchestrator()
-        agents = orchestrator.list_agents()
-        return JSONResponse(content=agents)
-        
-    except Exception as e:
-        logger.error(f"Failed to list agents: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/metrics")
-async def get_system_metrics():
-    """Get system metrics"""
-    try:
-        metrics = get_metrics()
-        stats = metrics.get_stats()
-        
-        return JSONResponse(content={
-            "status": "healthy",
-            "metrics": stats,
-            "timestamp": time.time()
-        })
-        
-    except Exception as e:
-        logger.error(f"Failed to get metrics: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return JSONResponse(content={
-        "status": "healthy",
-        "service": "Elite AI Platform",
-        "version": "1.0.0"
-    })
-
-
-# ============================================
-# VLLM SERVER MANAGEMENT
-# ============================================
-
-def start_vllm_server() -> Optional[subprocess.Popen]:
-    """Start vLLM server for Qwen model"""
-    try:
-        logger.info("Starting vLLM server...")
-        
-        cmd = [
-            "python", "-m", "vllm.entrypoints.openai.api_server",
-            "--model", Config.MODEL_NAME,
-            "--host", "0.0.0.0",
-            "--port", "8000",
-            "--dtype", "auto",
-            "--max-model-len", "2048",
-            "--gpu-memory-utilization", "0.9"
-        ]
-        
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        
-        # Wait for server to start
-        time.sleep(10)
-        logger.info("✅ vLLM server started")
-        
-        return process
-        
-    except Exception as e:
-        logger.warning(f"vLLM server start failed: {e}")
-        logger.info("Using fallback LLM client")
-        return None
-
-
-# ============================================
-# NGROK SETUP
-# ============================================
-
-def setup_ngrok() -> str:
-    """Setup NGROK tunnel"""
-    try:
-        auth_token = os.getenv("NGROK_AUTH_TOKEN")
-        if auth_token:
-            conf.get_default().auth_token = auth_token
-            conf.get_default().region = os.getenv("NGROK_REGION", "us")
-        
-        # Start tunnel
-        port = int(os.getenv("API_PORT", "7860"))
-        public_url = ngrok.connect(port, bind_tls=True)
-        
-        return public_url.public_url
-        
-    except Exception as e:
-        logger.error(f"NGROK setup failed: {e}")
-        return "http://localhost:7860"
-
-
-# ============================================
-# MAIN ENTRY POINT
-# ============================================
-
-def main():
-    """Main entry point"""
-    logger.info("""
-    ╔══════════════════════════════════════════════════════════╗
-    ║                                                          ║
-    ║     ELITE MULTI-AGENT AI PLATFORM                        ║
-    ║     Production-Grade Custom Agent Creation               ║
-    ║                                                          ║
-    ║     • 6 Core Specialized Agents                          ║
-    ║     • Custom Agent Factory                               ║
-    ║     • Live Web Scraping RAG                              ║
-    ║     • LangGraph Orchestration                            ║
-    ║     • Enterprise Architecture                            ║
-    ║                                                          ║
-    ╚══════════════════════════════════════════════════════════╝
-    """)
+def start_fastapi_app():
+    """Starts the FastAPI application server in a background thread."""
+    _, fastapi_app = get_app()
     
-    # Run FastAPI server
-    uvicorn.run(
-        app,
-        host=os.getenv("API_HOST", "0.0.0.0"),
-        port=int(os.getenv("API_PORT", "7860")),
-        workers=int(os.getenv("API_WORKERS", "1")),
-        log_level=os.getenv("LOG_LEVEL", "info").lower()
-    )
+    def run():
+        print("--- INFO: Starting FastAPI application server on port 8001. ---")
+        uvicorn.run(fastapi_app, host="0.0.0.0", port=8001, log_level="info")
 
+    thread = threading.Thread(target=run)
+    thread.daemon = True
+    thread.start()
+    print("--- INFO: FastAPI app thread started. ---")
+    time.sleep(5) # Give uvicorn a moment to bind to the port
+
+def start_ngrok_tunnel():
+    """Starts the ngrok tunnel to expose the FastAPI app."""
+    print("--- INFO: Starting ngrok tunnel to expose port 8001. ---")
+    # Using http protocol and a custom domain if available, otherwise a random one.
+    # The `pyngrok` library now serves a basic HTML page on the tunnel URL by default.
+    # To directly proxy, more advanced config might be needed, but this works for API access.
+    public_url = ngrok.connect(8001, "http")
+    print("="*60)
+    print(f"🚀 AI Core is LIVE! 🚀")
+    print(f"Access the dashboard at: {public_url}")
+    print("="*60)
+    return public_url
 
 if __name__ == "__main__":
-    main()
+    try:
+        setup_environment()
+        start_vllm_server()
+        start_fastapi_app()
+        start_ngrok_tunnel()
+
+        # Keep the main thread alive to let background threads run
+        while True:
+            time.sleep(60)
+            
+    except Exception as e:
+        print(f"--- FATAL ERROR: {e} ---")
+        ngrok.kill()
+    except KeyboardInterrupt:
+        print("\n--- INFO: Shutting down servers. ---")
+        ngrok.kill()
+        print("--- SUCCESS: Shutdown complete. ---")
