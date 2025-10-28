@@ -15,7 +15,7 @@ from pathlib import Path
 
 class ColabLauncher:
     def __init__(self):
-        self.ngrok_auth = os.getenv('NGROK_AUTH_TOKEN')
+        self.ngrok_auth = os.getenv('1vikehg18jsR9XrEzKEybCifEr9_AWWFzoCD58Xa151mXfLd')
         self.api_port = self._find_free_port(8000)
         self.dashboard_port = self._find_free_port(8080)
         os.environ['API_PORT'] = str(self.api_port)
