@@ -1,44 +1,44 @@
 # Core AI & LLM
 langchain
 langchain-community
-langchain-core
 langgraph
-transformers
-torch
+langchain-huggingface
 sentence-transformers
-huggingface-hub
-
-# Vector Store & Embeddings
 faiss-cpu
-chromadb
+openai
 
-# Web Scraping & Data
-beautifulsoup4
-requests
-lxml
-playwright
+# vLLM Inference Server
+vllm
+torch
+transformers
+accelerate
 
-# API Framework
+# Web Framework & APIs
 fastapi
 uvicorn
+pyngrok
 pydantic
 pydantic-settings
 
-# Workflow Orchestration
-apache-airflow
-apache-airflow-providers-http
+# Web Scraping & Data
+httpx
+beautifulsoup4
+lxml
+requests
+
+# Data Processing
+numpy
+pandas
 
 # Monitoring & Logging
+loguru
 prometheus-client
-python-json-logger
+
+# Environment & Config
+python-dotenv
 
 # Utilities
-python-dotenv
-pyngrok
-aiohttp
-tenacity
+aiofiles
+python-multipart
 jinja2
-
-# Security
-cryptography
-python-jose[cryptography]
+websockets
