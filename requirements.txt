@@ -1,44 +1,38 @@
-# Core AI & LLM
-langchain
-langchain-community
-langgraph
-langchain-huggingface
-sentence-transformers
-faiss-cpu
-openai
+# Core Framework
+langchain==0.1.16
+langgraph==0.0.40
+langchain-community==0.0.38
+langchain-huggingface==0.0.1
 
-# vLLM Inference Server
-vllm
-torch
-transformers
-accelerate
+# LLM Serving
+vllm==0.4.2
+transformers==4.40.0
+torch==2.3.0
+accelerate==0.29.3
 
-# Web Framework & APIs
-fastapi
-uvicorn
-pyngrok
-pydantic
-pydantic-settings
+# API & Web
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+pydantic-settings==2.2.1
+httpx==0.27.0
+aiohttp==3.9.5
 
-# Web Scraping & Data
-httpx
-beautifulsoup4
-lxml
-requests
+# Scraping & RAG
+beautifulsoup4==4.12.3
+selenium==4.20.0
+playwright==1.43.0
+chromadb==0.4.24
+sentence-transformers==2.7.0
+faiss-cpu==1.8.0
 
-# Data Processing
-numpy
-pandas
+# Tunneling & Monitoring
+pyngrok==7.1.5
+python-dotenv==1.0.1
+prometheus-client==0.20.0
 
-# Monitoring & Logging
-loguru
-prometheus-client
-
-# Environment & Config
-python-dotenv
-
-# Utilities
-aiofiles
-python-multipart
-jinja2
-websockets
+# Utilities (NO psutil)
+loguru==0.7.2
+tenacity==8.2.3
+jsonschema==4.22.0
+python-multipart==0.0.9
