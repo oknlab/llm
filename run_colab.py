@@ -1,38 +1,41 @@
 """
-Google Colab Entry Point - AI Agent Platform
-Handles vLLM server setup, NGROK tunneling, FastAPI server
+ELITE AI PLATFORM - COLAB RUNTIME
+Production deployment with FastAPI + NGROK + Dashboard
 """
 
-import asyncio
 import os
-import subprocess
 import sys
-import time
+import asyncio
+import signal
 from pathlib import Path
 from typing import Optional
+from contextlib import asynccontextmanager
+import time
+import subprocess
+import json
 
-import nest_asyncio
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
+# FastAPI
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from loguru import logger
-from pydantic import BaseModel
-from pyngrok import ngrok
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 import uvicorn
 
-# Apply nest_asyncio for Colab compatibility
-nest_asyncio.apply()
+# Environment & Logging
+from dotenv import load_dotenv
+from loguru import logger
 
-# Import system
+# System imports
 from system import (
-    AIAgentPlatform,
-    AgentRole,
-    TaskStatus,
+    get_orchestrator,
+    get_metrics,
     Config,
-    get_platform
+    AgentOrchestrator
 )
+
+# NGROK
+from pyngrok import ngrok, conf
 
 # ============================================
 # CONFIGURATION
@@ -40,18 +43,81 @@ from system import (
 
 load_dotenv()
 
-# NGROK Configuration
-NGROK_AUTH_TOKEN = os.getenv("NGROK_AUTH_TOKEN", "")
-API_PORT = int(os.getenv("API_PORT", "7860"))
+logger.add(
+    "logs/platform_{time}.log",
+    rotation="500 MB",
+    retention="10 days",
+    level=os.getenv("LOG_LEVEL", "INFO")
+)
+
+# ============================================
+# PYDANTIC MODELS
+# ============================================
+
+class QueryRequest(BaseModel):
+    """User query request"""
+    query: str = Field(..., min_length=1, max_length=5000, description="User query")
+    agent: Optional[str] = Field(None, description="Specific agent to use")
+    enable_rag: bool = Field(True, description="Enable RAG retrieval")
+
+
+class CustomAgentRequest(BaseModel):
+    """Custom agent creation request"""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str = Field(..., min_length=1, max_length=500)
+    capabilities: list[str] = Field(..., min_items=1)
+    system_prompt: str = Field(..., min_length=1, max_length=2000)
+
+
+class QueryResponse(BaseModel):
+    """Query response"""
+    status: str
+    output: Optional[str] = None
+    agents_used: Optional[list[str]] = None
+    iterations: Optional[int] = None
+    rag_context_used: Optional[bool] = None
+    error: Optional[str] = None
+    processing_time: Optional[float] = None
+
+
+# ============================================
+# LIFESPAN MANAGEMENT
+# ============================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan"""
+    logger.info("🚀 Starting Elite AI Platform...")
+    
+    # Initialize orchestrator
+    orchestrator = get_orchestrator()
+    logger.info("✅ Agent orchestrator initialized")
+    
+    # Start vLLM server
+    vllm_process = start_vllm_server()
+    
+    # Setup NGROK
+    ngrok_url = setup_ngrok()
+    logger.info(f"🌐 Public URL: {ngrok_url}")
+    
+    yield
+    
+    # Cleanup
+    logger.info("🛑 Shutting down...")
+    if vllm_process:
+        vllm_process.terminate()
+    ngrok.kill()
+
 
 # ============================================
 # FASTAPI APPLICATION
 # ============================================
 
 app = FastAPI(
-    title="AI Agent Platform API",
-    description="Enterprise Multi-Agent Orchestration System",
-    version="1.0.0"
+    title="Elite Multi-Agent AI Platform",
+    description="Enterprise-grade custom AI agent creation platform",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # CORS
@@ -64,341 +130,207 @@ app.add_middleware(
 )
 
 # ============================================
-# REQUEST/RESPONSE MODELS
-# ============================================
-
-class TaskCreateRequest(BaseModel):
-    task_type: str
-    description: str
-    parameters: dict = {}
-    use_rag: bool = False
-    rag_query: Optional[str] = None
-
-
-class TaskExecuteRequest(BaseModel):
-    task_id: str
-
-
-class CustomAgentRequest(BaseModel):
-    agent_id: str
-    system_prompt: str
-    capabilities: list[str]
-
-
-class QueryRequest(BaseModel):
-    query: str
-    agent_role: Optional[str] = None
-    use_rag: bool = False
-    rag_query: Optional[str] = None
-
-
-# ============================================
-# API ENDPOINTS
+# ROUTES
 # ============================================
 
 @app.get("/", response_class=HTMLResponse)
-async def root():
-    """Serve dashboard"""
-    dashboard_path = Path(__file__).parent / "dashboard.html"
-    if dashboard_path.exists():
-        return dashboard_path.read_text()
-    return "<h1>AI Agent Platform API</h1><p>Dashboard not found. Access /docs for API documentation.</p>"
+async def dashboard():
+    """Serve main dashboard"""
+    dashboard_path = Path("dashboard.html")
+    if not dashboard_path.exists():
+        return HTMLResponse("<h1>Dashboard not found</h1>", status_code=404)
+    
+    return HTMLResponse(dashboard_path.read_text())
 
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "timestamp": time.time(),
-        "version": "1.0.0"
-    }
-
-
-@app.post("/api/tasks/create")
-async def create_task(request: TaskCreateRequest):
-    """Create new task"""
+@app.post("/api/query", response_model=QueryResponse)
+async def process_query(request: QueryRequest, background_tasks: BackgroundTasks):
+    """Process user query through multi-agent system"""
+    start_time = time.time()
+    
     try:
-        platform = get_platform()
+        orchestrator = get_orchestrator()
+        metrics = get_metrics()
         
-        # Add RAG parameters
-        params = request.parameters.copy()
-        params["use_rag"] = request.use_rag
-        params["rag_query"] = request.rag_query
+        # Process query
+        result = orchestrator.process(request.query)
         
-        task = await platform.create_task(
-            task_type=request.task_type,
-            description=request.description,
-            parameters=params
+        processing_time = time.time() - start_time
+        
+        # Record metrics
+        if result.get("agents_used"):
+            for agent in result["agents_used"]:
+                metrics.record_request(agent, processing_time)
+        
+        return QueryResponse(
+            status=result["status"],
+            output=result.get("output"),
+            agents_used=result.get("agents_used"),
+            iterations=result.get("iterations"),
+            rag_context_used=result.get("rag_context_used"),
+            error=result.get("error"),
+            processing_time=processing_time
         )
         
-        return {
-            "success": True,
-            "task_id": task.task_id,
-            "status": task.status.value
-        }
     except Exception as e:
-        logger.error(f"Task creation error: {e}")
+        logger.error(f"Query processing failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/tasks/execute")
-async def execute_task(request: TaskExecuteRequest, background_tasks: BackgroundTasks):
-    """Execute task by ID"""
-    try:
-        platform = get_platform()
-        
-        # Execute in background
-        background_tasks.add_task(platform.execute_task, request.task_id)
-        
-        return {
-            "success": True,
-            "message": f"Task {request.task_id} execution started",
-            "task_id": request.task_id
-        }
-    except Exception as e:
-        logger.error(f"Task execution error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/tasks/{task_id}")
-async def get_task(task_id: str):
-    """Get task status and result"""
-    try:
-        platform = get_platform()
-        task = platform.get_task(task_id)
-        
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-        
-        return {
-            "task_id": task.task_id,
-            "task_type": task.task_type,
-            "description": task.description,
-            "status": task.status.value,
-            "result": task.result,
-            "error": task.error,
-            "created_at": task.created_at.isoformat(),
-            "completed_at": task.completed_at.isoformat() if task.completed_at else None
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Get task error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/tasks")
-async def list_tasks():
-    """List all tasks"""
-    try:
-        platform = get_platform()
-        tasks = platform.list_tasks()
-        
-        return {
-            "tasks": [
-                {
-                    "task_id": t.task_id,
-                    "task_type": t.task_type,
-                    "status": t.status.value,
-                    "created_at": t.created_at.isoformat()
-                }
-                for t in tasks
-            ]
-        }
-    except Exception as e:
-        logger.error(f"List tasks error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/query")
-async def query_agent(request: QueryRequest):
-    """Direct query to agent system"""
-    try:
-        platform = get_platform()
-        
-        result = await platform.orchestrator.execute_task(
-            task=request.query,
-            context={"agent_role": request.agent_role},
-            use_rag=request.use_rag,
-            rag_query=request.rag_query
-        )
-        
-        return {
-            "success": True,
-            "result": result
-        }
-    except Exception as e:
-        logger.error(f"Query error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/agents/custom/create")
+@app.post("/api/agents/create")
 async def create_custom_agent(request: CustomAgentRequest):
-    """Create custom agent"""
+    """Create custom AI agent"""
     try:
-        platform = get_platform()
+        orchestrator = get_orchestrator()
         
-        agent = platform.orchestrator.custom_builder.create_custom_agent(
-            agent_id=request.agent_id,
-            system_prompt=request.system_prompt,
-            capabilities=request.capabilities
+        result = orchestrator.create_custom_agent(
+            name=request.name,
+            description=request.description,
+            capabilities=request.capabilities,
+            system_prompt=request.system_prompt
         )
         
-        return {
-            "success": True,
-            "agent_id": request.agent_id,
-            "message": "Custom agent created successfully"
-        }
+        if result["status"] == "success":
+            return JSONResponse(content=result, status_code=201)
+        else:
+            raise HTTPException(status_code=400, detail=result.get("error"))
+            
     except Exception as e:
-        logger.error(f"Custom agent creation error: {e}")
+        logger.error(f"Agent creation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/agents")
 async def list_agents():
-    """List available agents"""
-    return {
-        "agents": [
-            {"role": "code_architect", "description": "Code architecture and development"},
-            {"role": "sec_analyst", "description": "Security analysis and pentesting"},
-            {"role": "auto_bot", "description": "Automation and workflows"},
-            {"role": "creative_agent", "description": "Creative content generation"},
-            {"role": "agent_suite", "description": "Business operations and admin"},
-        ]
-    }
+    """List all available agents"""
+    try:
+        orchestrator = get_orchestrator()
+        agents = orchestrator.list_agents()
+        return JSONResponse(content=agents)
+        
+    except Exception as e:
+        logger.error(f"Failed to list agents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/metrics")
+async def get_system_metrics():
+    """Get system metrics"""
+    try:
+        metrics = get_metrics()
+        stats = metrics.get_stats()
+        
+        return JSONResponse(content={
+            "status": "healthy",
+            "metrics": stats,
+            "timestamp": time.time()
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to get metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return JSONResponse(content={
+        "status": "healthy",
+        "service": "Elite AI Platform",
+        "version": "1.0.0"
+    })
 
 
 # ============================================
 # VLLM SERVER MANAGEMENT
 # ============================================
 
-class VLLMServer:
-    """vLLM server manager"""
-    
-    def __init__(self):
-        self.process: Optional[subprocess.Popen] = None
-        self.model_name = Config.MODEL_NAME
-        self.port = int(os.getenv("VLLM_PORT", "8000"))
-    
-    def start(self):
-        """Start vLLM server"""
-        logger.info(f"Starting vLLM server with model: {self.model_name}")
+def start_vllm_server() -> Optional[subprocess.Popen]:
+    """Start vLLM server for Qwen model"""
+    try:
+        logger.info("Starting vLLM server...")
         
         cmd = [
             "python", "-m", "vllm.entrypoints.openai.api_server",
-            "--model", self.model_name,
+            "--model", Config.MODEL_NAME,
             "--host", "0.0.0.0",
-            "--port", str(self.port),
-            "--max-model-len", os.getenv("VLLM_MAX_MODEL_LEN", "4096"),
-            "--gpu-memory-utilization", os.getenv("VLLM_GPU_MEMORY", "0.90"),
+            "--port", "8000",
+            "--dtype", "auto",
+            "--max-model-len", "2048",
+            "--gpu-memory-utilization", "0.9"
         ]
         
-        try:
-            self.process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            
-            # Wait for server to be ready
-            logger.info("Waiting for vLLM server to start...")
-            time.sleep(30)
-            
-            logger.info(f"vLLM server started on port {self.port}")
-            
-        except Exception as e:
-            logger.error(f"Failed to start vLLM server: {e}")
-            raise
-    
-    def stop(self):
-        """Stop vLLM server"""
-        if self.process:
-            self.process.terminate()
-            self.process.wait()
-            logger.info("vLLM server stopped")
-
-
-# ============================================
-# NGROK TUNNEL
-# ============================================
-
-def setup_ngrok():
-    """Setup NGROK tunnel"""
-    if not NGROK_AUTH_TOKEN:
-        logger.warning("NGROK_AUTH_TOKEN not set, skipping tunnel setup")
-        return None
-    
-    try:
-        ngrok.set_auth_token(NGROK_AUTH_TOKEN)
-        tunnel = ngrok.connect(API_PORT, bind_tls=True)
-        public_url = tunnel.public_url
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
         
-        logger.info(f"NGROK tunnel established: {public_url}")
-        return public_url
+        # Wait for server to start
+        time.sleep(10)
+        logger.info("✅ vLLM server started")
+        
+        return process
+        
+    except Exception as e:
+        logger.warning(f"vLLM server start failed: {e}")
+        logger.info("Using fallback LLM client")
+        return None
+
+
+# ============================================
+# NGROK SETUP
+# ============================================
+
+def setup_ngrok() -> str:
+    """Setup NGROK tunnel"""
+    try:
+        auth_token = os.getenv("NGROK_AUTH_TOKEN")
+        if auth_token:
+            conf.get_default().auth_token = auth_token
+            conf.get_default().region = os.getenv("NGROK_REGION", "us")
+        
+        # Start tunnel
+        port = int(os.getenv("API_PORT", "7860"))
+        public_url = ngrok.connect(port, bind_tls=True)
+        
+        return public_url.public_url
         
     except Exception as e:
         logger.error(f"NGROK setup failed: {e}")
-        return None
+        return "http://localhost:7860"
 
 
 # ============================================
-# MAIN EXECUTION
+# MAIN ENTRY POINT
 # ============================================
 
 def main():
-    """Main execution function"""
-    logger.info("=" * 60)
-    logger.info("AI AGENT PLATFORM - STARTING")
-    logger.info("=" * 60)
+    """Main entry point"""
+    logger.info("""
+    ╔══════════════════════════════════════════════════════════╗
+    ║                                                          ║
+    ║     ELITE MULTI-AGENT AI PLATFORM                        ║
+    ║     Production-Grade Custom Agent Creation               ║
+    ║                                                          ║
+    ║     • 6 Core Specialized Agents                          ║
+    ║     • Custom Agent Factory                               ║
+    ║     • Live Web Scraping RAG                              ║
+    ║     • LangGraph Orchestration                            ║
+    ║     • Enterprise Architecture                            ║
+    ║                                                          ║
+    ╚══════════════════════════════════════════════════════════╝
+    """)
     
-    # Setup directories
-    Config.setup_directories()
-    
-    # Start vLLM server
-    vllm_server = VLLMServer()
-    
-    try:
-        logger.info("Step 1: Starting vLLM model server...")
-        vllm_server.start()
-        
-        logger.info("Step 2: Setting up NGROK tunnel...")
-        public_url = setup_ngrok()
-        
-        if public_url:
-            logger.info(f"Public URL: {public_url}")
-            logger.info(f"Dashboard: {public_url}")
-            logger.info(f"API Docs: {public_url}/docs")
-        
-        logger.info("Step 3: Starting FastAPI server...")
-        logger.info(f"Local URL: http://localhost:{API_PORT}")
-        
-        # Run FastAPI server
-        uvicorn.run(
-            app,
-            host="0.0.0.0",
-            port=API_PORT,
-            log_level="info"
-        )
-        
-    except KeyboardInterrupt:
-        logger.info("Shutting down gracefully...")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-    finally:
-        vllm_server.stop()
-        ngrok.kill()
-        logger.info("Shutdown complete")
+    # Run FastAPI server
+    uvicorn.run(
+        app,
+        host=os.getenv("API_HOST", "0.0.0.0"),
+        port=int(os.getenv("API_PORT", "7860")),
+        workers=int(os.getenv("API_WORKERS", "1")),
+        log_level=os.getenv("LOG_LEVEL", "info").lower()
+    )
 
 
 if __name__ == "__main__":
-    # Check if running in Colab
-    try:
-        import google.colab
-        IN_COLAB = True
-        logger.info("Running in Google Colab environment")
-    except:
-        IN_COLAB = False
-        logger.info("Running in local environment")
-    
     main()
