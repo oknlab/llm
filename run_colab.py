@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Google Colab launcher with NGROK tunneling for AI Agents Platform.
-Fixed port conflicts and dependency handling.
+Google Colab launcher with SINGLE NGROK tunnel for both API and Dashboard.
+Unified access through one URL.
 """
 
 import os
@@ -15,11 +15,9 @@ from pathlib import Path
 
 class ColabLauncher:
     def __init__(self):
-        self.ngrok_auth = os.getenv('1vikehg18jsR9XrEzKEybCifEr9_AWWFzoCD58Xa151mXfLd')
-        self.api_port = self._find_free_port(8000)
-        self.dashboard_port = self._find_free_port(8080)
-        os.environ['API_PORT'] = str(self.api_port)
-        os.environ['DASHBOARD_PORT'] = str(self.dashboard_port)
+        self.ngrok_auth = os.getenv('NGROK_AUTH_TOKEN')
+        self.unified_port = self._find_free_port(8000)
+        os.environ['UNIFIED_PORT'] = str(self.unified_port)
         
     def _find_free_port(self, start_port):
         """Find next available port starting from start_port."""
@@ -35,7 +33,7 @@ class ColabLauncher:
     
     def setup_environment(self):
         """Configure environment with proper dependency installation."""
-        print("Installing dependencies...")
+        print("🔧 Installing dependencies...")
         
         # Install requirements with proper error handling
         req_file = Path('requirements.txt')
@@ -46,12 +44,13 @@ class ColabLauncher:
                 text=True
             )
             if result.returncode != 0:
-                print(f"Warning: Some packages failed to install: {result.stderr}")
+                print(f"⚠️ Warning: Some packages failed to install: {result.stderr}")
         
         # Install pyngrok separately if needed
         try:
             import pyngrok
         except ImportError:
+            print("📦 Installing pyngrok...")
             subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'pyngrok'])
         
         # Setup NGROK
@@ -59,88 +58,110 @@ class ColabLauncher:
             try:
                 from pyngrok import ngrok
                 ngrok.set_auth_token(self.ngrok_auth)
-                print("NGROK configured successfully")
+                print("✅ NGROK configured successfully")
             except Exception as e:
-                print(f"NGROK setup warning: {e}")
+                print(f"⚠️ NGROK setup warning: {e}")
+        else:
+            print("ℹ️ No NGROK token provided - will run locally only")
     
-    def start_ngrok(self, port, name):
-        """Initialize NGROK tunnel with error handling."""
+    def start_unified_tunnel(self):
+        """Start single NGROK tunnel for unified service."""
         try:
             from pyngrok import ngrok
-            public_url = ngrok.connect(port, bind_tls=True)
-            print(f"\n✓ [{name}] Public URL: {public_url}")
-            return public_url
+            
+            # Kill any existing tunnels
+            ngrok.kill()
+            
+            # Create single tunnel
+            public_url = ngrok.connect(self.unified_port, bind_tls=True)
+            
+            return str(public_url)
         except ImportError:
-            print(f"[{name}] NGROK not available - using local access only")
-            return f"http://localhost:{port}"
+            print("⚠️ NGROK not available - using local access only")
+            return f"http://localhost:{self.unified_port}"
         except Exception as e:
-            print(f"[{name}] NGROK tunnel failed: {e}")
-            return f"http://localhost:{port}"
+            print(f"⚠️ NGROK tunnel failed: {e}")
+            return f"http://localhost:{self.unified_port}"
     
-    def serve_dashboard(self):
-        """Custom dashboard server to avoid port conflicts."""
-        import http.server
-        import socketserver
+    def launch_unified_service(self):
+        """Launch unified API + Dashboard service."""
+        print(f"\n🚀 Starting unified service on port {self.unified_port}...")
         
-        class DashboardHandler(http.server.SimpleHTTPRequestHandler):
-            def do_GET(self):
-                if self.path == '/' or self.path == '/dashboard.html':
-                    self.path = '/dashboard.html'
-                return super().do_GET()
-        
-        with socketserver.TCPServer(("", self.dashboard_port), DashboardHandler) as httpd:
-            print(f"Dashboard serving at port {self.dashboard_port}")
-            httpd.serve_forever()
-    
-    def launch_services(self):
-        """Launch services with proper error handling."""
-        print(f"\nStarting services...")
-        print(f"API Port: {self.api_port}")
-        print(f"Dashboard Port: {self.dashboard_port}")
-        
-        # API Server
-        api_thread = threading.Thread(
+        # Start unified FastAPI server
+        server_thread = threading.Thread(
             target=lambda: subprocess.run([
                 sys.executable, '-m', 'uvicorn', 
                 'system:app', '--host', '0.0.0.0', 
-                '--port', str(self.api_port), '--reload'
+                '--port', str(self.unified_port), '--reload'
             ])
         )
-        api_thread.daemon = True
-        api_thread.start()
+        server_thread.daemon = True
+        server_thread.start()
         
-        # Dashboard Server
-        dashboard_thread = threading.Thread(target=self.serve_dashboard)
-        dashboard_thread.daemon = True
-        dashboard_thread.start()
+        # Wait for service to start
+        time.sleep(5)
         
-        # Wait for services to start
-        time.sleep(3)
+        # Start single NGROK tunnel
+        public_url = self.start_unified_tunnel()
         
-        # Start NGROK tunnels
-        api_url = self.start_ngrok(self.api_port, 'API')
-        dashboard_url = self.start_ngrok(self.dashboard_port, 'Dashboard')
+        # Display access information
+        self.display_access_info(public_url)
         
-        print("\n" + "="*50)
-        print("✓ AI AGENTS PLATFORM READY")
-        print("="*50)
-        print(f"API Local: http://localhost:{self.api_port}")
-        print(f"Dashboard Local: http://localhost:{self.dashboard_port}")
-        if 'ngrok' in str(api_url):
-            print(f"API Public: {api_url}")
-            print(f"Dashboard Public: {dashboard_url}")
-        print("="*50 + "\n")
+        return public_url
+    
+    def display_access_info(self, public_url):
+        """Display formatted access information."""
+        print("\n" + "="*60)
+        print("🎯 AI AGENTS PLATFORM - UNIFIED ACCESS")
+        print("="*60)
         
+        local_url = f"http://localhost:{self.unified_port}"
+        
+        if 'ngrok' in public_url:
+            print(f"""
+📡 PUBLIC ACCESS (Single URL for Everything):
+   {public_url}
+   
+   • Dashboard: {public_url}/
+   • API Docs:  {public_url}/docs
+   • Health:    {public_url}/health
+            """)
+        
+        print(f"""
+💻 LOCAL ACCESS:
+   {local_url}
+   
+   • Dashboard: {local_url}/
+   • API Docs:  {local_url}/docs
+   • Health:    {local_url}/health
+        """)
+        
+        print("="*60)
+        print("✅ Platform Ready! Access everything through ONE URL")
+        print("="*60 + "\n")
+    
     def run(self):
         """Main execution flow."""
+        print("""
+╔══════════════════════════════════════════════════════════╗
+║     🤖 AI AGENTS PLATFORM - Enterprise Edition 🤖        ║
+║         Single URL Access - Unified Interface            ║
+╚══════════════════════════════════════════════════════════╝
+        """)
+        
         self.setup_environment()
-        self.launch_services()
+        public_url = self.launch_unified_service()
         
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
-            print("\nShutting down platform...")
+            print("\n⏹️ Shutting down platform...")
+            try:
+                from pyngrok import ngrok
+                ngrok.kill()
+            except:
+                pass
             sys.exit(0)
 
 if __name__ == "__main__":
