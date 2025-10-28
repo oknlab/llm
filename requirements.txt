@@ -1,38 +1,45 @@
 # Core Framework
-langchain==0.1.16
-langgraph==0.0.40
-langchain-community==0.0.38
-langchain-huggingface==0.0.1
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
 
-# LLM Serving
-vllm==0.4.2
-transformers==4.40.0
-torch==2.3.0
-accelerate==0.29.3
+# AI/ML Stack
+langchain==0.1.4
+langgraph==0.0.20
+langchain-community==0.0.16
+transformers==4.36.2
+torch==2.1.2
+sentence-transformers==2.3.1
+chromadb==0.4.22
+vllm==0.2.7
 
-# API & Web
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-pydantic==2.7.1
-pydantic-settings==2.2.1
-httpx==0.27.0
-aiohttp==3.9.5
-
-# Scraping & RAG
+# Web Scraping & RAG
 beautifulsoup4==4.12.3
-selenium==4.20.0
-playwright==1.43.0
-chromadb==0.4.24
-sentence-transformers==2.7.0
-faiss-cpu==1.8.0
+requests==2.31.0
+lxml==5.1.0
+playwright==1.41.2
+selenium==4.17.2
+httpx==0.26.0
 
-# Tunneling & Monitoring
-pyngrok==7.1.5
-python-dotenv==1.0.1
-prometheus-client==0.20.0
+# Data Processing
+numpy==1.26.3
+pandas==2.2.0
+tiktoken==0.5.2
 
-# Utilities (NO psutil)
+# API & Networking
+pyngrok==7.0.5
+python-multipart==0.0.6
+python-dotenv==1.0.0
+
+# Monitoring & Logging
 loguru==0.7.2
+prometheus-client==0.19.0
+
+# Async & Task Queue
+aiohttp==3.9.1
+asyncio==3.4.3
 tenacity==8.2.3
-jsonschema==4.22.0
-python-multipart==0.0.9
+
+# Vector Store & Embeddings
+faiss-cpu==1.7.4
