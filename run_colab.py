@@ -1,363 +1,370 @@
 """
-GOOGLE COLAB EXECUTION SCRIPT
-Enterprise AI Multi-Agent Orchestration System
+Google Colab Orchestration Script
+Launches vLLM Server, FastAPI Service, NGROK Tunnel, and Dashboard
 """
 
 import os
 import sys
 import asyncio
-import logging
-from pathlib import Path
 import subprocess
 import time
+import signal
+from pathlib import Path
 from typing import Optional
-import nest_asyncio
 
-# Enable nested event loops for Colab
-nest_asyncio.apply()
+from loguru import logger
+from pyngrok import ngrok, conf
+from dotenv import load_dotenv
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Load environment
+load_dotenv()
 
 
 # ============================================================================
-# ENVIRONMENT SETUP
+# CONFIGURATION
 # ============================================================================
 
-def setup_environment():
-    """Setup Colab environment"""
-    logger.info("🚀 Setting up Enterprise AI Multi-Agent System...")
+class ColabConfig:
+    """Colab deployment configuration"""
     
-    # Create directory structure
-    dirs = ['logs', 'vectordb', 'airflow/dags']
-    for dir_path in dirs:
-        Path(dir_path).mkdir(parents=True, exist_ok=True)
+    # Paths
+    BASE_DIR = Path(__file__).parent
+    ENV_FILE = BASE_DIR / ".env"
+    DASHBOARD_FILE = BASE_DIR / "dashboard.html"
     
-    # Set environment variables
-    os.environ['PYTHONUNBUFFERED'] = '1'
-    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+    # Model Configuration
+    MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-1.7B")
+    VLLM_HOST = os.getenv("MODEL_SERVER_HOST", "0.0.0.0")
+    VLLM_PORT = int(os.getenv("MODEL_SERVER_PORT", "8000"))
     
-    logger.info("✅ Environment setup complete")
+    # API Configuration
+    API_HOST = os.getenv("API_HOST", "0.0.0.0")
+    API_PORT = int(os.getenv("API_PORT", "7860"))
+    
+    # NGROK Configuration
+    NGROK_TOKEN = os.getenv("NGROK_AUTH_TOKEN")
+    NGROK_REGION = os.getenv("NGROK_REGION", "us")
+    
+    # vLLM Performance
+    TENSOR_PARALLEL = int(os.getenv("VLLM_TENSOR_PARALLEL_SIZE", "1"))
+    GPU_MEMORY = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.85"))
+    MAX_MODEL_LEN = int(os.getenv("VLLM_MAX_MODEL_LEN", "4096"))
 
 
-def install_dependencies():
-    """Install system dependencies"""
-    logger.info("📦 Installing dependencies...")
+config = ColabConfig()
+
+
+# ============================================================================
+# PROCESS MANAGEMENT
+# ============================================================================
+
+class ProcessManager:
+    """Manage subprocess lifecycle"""
     
-    try:
-        # Install requirements
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"],
-            check=True
+    def __init__(self):
+        self.processes: dict[str, subprocess.Popen] = {}
+        self.tunnels: dict[str, str] = {}
+        
+        # Register signal handlers
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _signal_handler(self, signum, frame):
+        """Graceful shutdown on signal"""
+        logger.warning(f"Received signal {signum}, shutting down...")
+        self.shutdown_all()
+        sys.exit(0)
+    
+    def start_process(
+        self, 
+        name: str, 
+        command: list[str], 
+        env: Optional[dict] = None
+    ) -> subprocess.Popen:
+        """Start a subprocess"""
+        logger.info(f"Starting {name}: {' '.join(command)}")
+        
+        process_env = os.environ.copy()
+        if env:
+            process_env.update(env)
+        
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=process_env,
+            text=True,
+            bufsize=1
         )
         
-        # Install playwright browsers for advanced scraping (optional)
-        try:
-            subprocess.run(
-                ["playwright", "install", "chromium"],
-                check=False,
-                capture_output=True
-            )
-        except:
-            logger.warning("Playwright browser install skipped")
+        self.processes[name] = process
+        logger.success(f"{name} started (PID: {process.pid})")
         
-        logger.info("✅ Dependencies installed")
+        return process
     
-    except Exception as e:
-        logger.error(f"❌ Dependency installation failed: {e}")
-        raise
+    def is_alive(self, name: str) -> bool:
+        """Check if process is running"""
+        if name not in self.processes:
+            return False
+        return self.processes[name].poll() is None
+    
+    def shutdown_all(self):
+        """Shutdown all processes"""
+        logger.info("Shutting down all processes...")
+        
+        # Close NGROK tunnels
+        ngrok.kill()
+        
+        # Terminate processes
+        for name, process in self.processes.items():
+            if process.poll() is None:
+                logger.info(f"Terminating {name} (PID: {process.pid})")
+                process.terminate()
+                
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"Force killing {name}")
+                    process.kill()
+        
+        logger.success("All processes shutdown")
 
 
-def validate_config():
-    """Validate configuration"""
-    logger.info("🔍 Validating configuration...")
+# ============================================================================
+# VLLM SERVER LAUNCHER
+# ============================================================================
+
+class VLLMServer:
+    """vLLM Inference Server Manager"""
     
-    required_vars = ['NGROK_AUTH_TOKEN', 'GOOGLE_CSE_URL']
+    @staticmethod
+    def check_gpu():
+        """Check GPU availability"""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                logger.success(f"GPU available: {gpu_name}")
+                return True
+            else:
+                logger.warning("No GPU detected, using CPU (slow)")
+                return False
+        except ImportError:
+            logger.error("PyTorch not installed")
+            return False
     
-    from dotenv import load_dotenv
-    load_dotenv()
+    @staticmethod
+    def install_model():
+        """Download model from Hugging Face"""
+        logger.info(f"Checking model: {config.MODEL_NAME}")
+        
+        try:
+            from huggingface_hub import snapshot_download
+            
+            cache_dir = Path.home() / ".cache" / "huggingface"
+            model_path = snapshot_download(
+                repo_id=config.MODEL_NAME,
+                cache_dir=cache_dir
+            )
+            
+            logger.success(f"Model cached at: {model_path}")
+            return model_path
+        
+        except Exception as e:
+            logger.error(f"Model download failed: {e}")
+            raise
     
-    missing = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing:
-        logger.error(f"❌ Missing required environment variables: {', '.join(missing)}")
-        logger.info("Please update .env file with required values")
-        return False
-    
-    logger.info("✅ Configuration validated")
-    return True
+    @staticmethod
+    def launch(process_manager: ProcessManager):
+        """Launch vLLM server"""
+        
+        # Check GPU
+        has_gpu = VLLMServer.check_gpu()
+        
+        # Install model
+        model_path = VLLMServer.install_model()
+        
+        # Build vLLM command
+        vllm_cmd = [
+            "python", "-m", "vllm.entrypoints.openai.api_server",
+            "--model", config.MODEL_NAME,
+            "--host", config.VLLM_HOST,
+            "--port", str(config.VLLM_PORT),
+            "--tensor-parallel-size", str(config.TENSOR_PARALLEL),
+            "--gpu-memory-utilization", str(config.GPU_MEMORY),
+            "--max-model-len", str(config.MAX_MODEL_LEN),
+            "--trust-remote-code"
+        ]
+        
+        if not has_gpu:
+            vllm_cmd.extend(["--device", "cpu"])
+        
+        # Start vLLM
+        process_manager.start_process("vLLM", vllm_cmd)
+        
+        # Wait for server to be ready
+        logger.info("Waiting for vLLM server to be ready...")
+        time.sleep(30)  # Adjust based on model size
+        
+        # Health check
+        import httpx
+        try:
+            response = httpx.get(f"http://{config.VLLM_HOST}:{config.VLLM_PORT}/health", timeout=10)
+            if response.status_code == 200:
+                logger.success("vLLM server is ready")
+            else:
+                logger.error(f"vLLM health check failed: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"vLLM health check error: {e}")
 
 
 # ============================================================================
 # NGROK TUNNEL SETUP
 # ============================================================================
 
-def setup_ngrok():
-    """Setup ngrok tunnel for API access"""
-    logger.info("🌐 Setting up ngrok tunnel...")
+class NGROKManager:
+    """NGROK Tunnel Manager"""
     
-    try:
-        from pyngrok import ngrok, conf
+    @staticmethod
+    def setup_auth():
+        """Configure NGROK authentication"""
+        if not config.NGROK_TOKEN:
+            logger.error("NGROK_AUTH_TOKEN not set in .env file")
+            raise ValueError("NGROK token required")
         
-        # Set auth token
-        auth_token = os.getenv('NGROK_AUTH_TOKEN')
-        conf.get_default().auth_token = auth_token
+        conf.get_default().auth_token = config.NGROK_TOKEN
+        conf.get_default().region = config.NGROK_REGION
         
-        # Kill existing tunnels
-        ngrok.kill()
-        
-        # Create HTTP tunnel
-        api_port = int(os.getenv('API_PORT', 8080))
-        tunnel = ngrok.connect(api_port, "http")
-        
-        logger.info(f"✅ Ngrok tunnel active: {tunnel.public_url}")
-        logger.info(f"📡 API accessible at: {tunnel.public_url}/docs")
-        
-        return tunnel
+        logger.success("NGROK authenticated")
     
-    except Exception as e:
-        logger.error(f"❌ Ngrok setup failed: {e}")
-        return None
-
-
-# ============================================================================
-# MODEL INITIALIZATION
-# ============================================================================
-
-async def initialize_model():
-    """Initialize Qwen3-1.7B model"""
-    logger.info("🤖 Initializing Qwen3-1.7B model...")
-    
-    try:
-        from system import LLMEngine
-        
-        # This will download and load the model
-        engine = LLMEngine()
-        
-        # Test generation
-        test_response = await engine.generate("Hello! System check.", max_tokens=50)
-        logger.info(f"✅ Model initialized. Test response: {test_response[:100]}...")
-        
-        return engine
-    
-    except Exception as e:
-        logger.error(f"❌ Model initialization failed: {e}")
-        raise
-
-
-# ============================================================================
-# FASTAPI SERVER
-# ============================================================================
-
-class ServerManager:
-    """Manage FastAPI server lifecycle"""
-    
-    def __init__(self):
-        self.process: Optional[subprocess.Popen] = None
-        self.tunnel = None
-    
-    def start(self):
-        """Start FastAPI server"""
-        logger.info("🚀 Starting FastAPI server...")
-        
+    @staticmethod
+    def create_tunnel(port: int, name: str = "api") -> str:
+        """Create NGROK tunnel"""
         try:
-            api_host = os.getenv('API_HOST', '0.0.0.0')
-            api_port = int(os.getenv('API_PORT', 8080))
-            
-            # Start uvicorn server
-            self.process = subprocess.Popen(
-                [
-                    sys.executable, "-m", "uvicorn",
-                    "system:app",
-                    "--host", api_host,
-                    "--port", str(api_port),
-                    "--workers", "1",
-                    "--log-level", "info"
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                universal_newlines=True
+            tunnel = ngrok.connect(
+                port,
+                bind_tls=True,
+                name=name
             )
             
-            # Wait for server to start
-            time.sleep(5)
+            public_url = tunnel.public_url
+            logger.success(f"NGROK tunnel created: {public_url}")
             
-            if self.process.poll() is None:
-                logger.info(f"✅ FastAPI server running on http://{api_host}:{api_port}")
-                
-                # Setup ngrok tunnel
-                self.tunnel = setup_ngrok()
-                
-                return True
-            else:
-                logger.error("❌ FastAPI server failed to start")
-                return False
+            return public_url
         
         except Exception as e:
-            logger.error(f"❌ Server start failed: {e}")
-            return False
-    
-    def stop(self):
-        """Stop FastAPI server"""
-        if self.process:
-            self.process.terminate()
-            self.process.wait()
-            logger.info("🛑 FastAPI server stopped")
-        
-        if self.tunnel:
-            from pyngrok import ngrok
-            ngrok.kill()
-            logger.info("🛑 Ngrok tunnel closed")
+            logger.error(f"NGROK tunnel creation failed: {e}")
+            raise
 
 
 # ============================================================================
-# INTERACTIVE DEMO
+# DASHBOARD SERVER
 # ============================================================================
 
-async def run_interactive_demo():
-    """Run interactive demo"""
-    logger.info("\n" + "="*70)
-    logger.info("🎯 ENTERPRISE AI MULTI-AGENT SYSTEM - INTERACTIVE DEMO")
-    logger.info("="*70 + "\n")
+def serve_dashboard(process_manager: ProcessManager):
+    """Serve HTML dashboard"""
     
-    from system import MultiAgentOrchestrator
+    if not config.DASHBOARD_FILE.exists():
+        logger.error(f"Dashboard file not found: {config.DASHBOARD_FILE}")
+        return
     
-    orchestrator = MultiAgentOrchestrator()
-    
-    demo_tasks = [
-        {
-            'task': 'Create a FastAPI endpoint for user authentication with JWT tokens',
-            'task_type': 'code',
-            'description': 'Code generation task'
-        },
-        {
-            'task': 'Audit this authentication endpoint for security vulnerabilities',
-            'task_type': 'security',
-            'description': 'Security analysis task'
-        },
-        {
-            'task': 'Design an Airflow DAG to automate daily data pipeline',
-            'task_type': 'automation',
-            'description': 'Automation workflow task'
-        },
-        {
-            'task': 'Generate a marketing blog post about AI automation benefits',
-            'task_type': 'content',
-            'description': 'Content creation task'
-        }
+    # Simple HTTP server for dashboard
+    dashboard_cmd = [
+        "python", "-m", "http.server",
+        "8080",
+        "--directory", str(config.BASE_DIR)
     ]
     
-    for idx, demo in enumerate(demo_tasks, 1):
-        logger.info(f"\n{'='*70}")
-        logger.info(f"📋 DEMO {idx}/{len(demo_tasks)}: {demo['description']}")
-        logger.info(f"{'='*70}")
-        logger.info(f"Task: {demo['task']}")
-        logger.info(f"Type: {demo['task_type']}")
-        logger.info("\n⏳ Processing...\n")
-        
-        result = await orchestrator.process_task(
-            task=demo['task'],
-            task_type=demo['task_type'],
-            enable_rag=True
-        )
-        
-        logger.info(f"✅ Status: {result['status']}")
-        logger.info(f"🤖 Agent: {result['agent']}")
-        logger.info(f"📚 RAG Contexts: {result['context_used']}")
-        
-        if result['output']:
-            logger.info(f"\n📤 OUTPUT:\n{'-'*70}")
-            logger.info(result['output'][:500] + "..." if len(result['output']) > 500 else result['output'])
-            logger.info(f"{'-'*70}\n")
-        
-        if result['errors']:
-            logger.warning(f"⚠️ Errors: {result['errors']}")
-        
-        await asyncio.sleep(2)
-    
-    logger.info("\n" + "="*70)
-    logger.info("✅ DEMO COMPLETED")
-    logger.info("="*70 + "\n")
+    process_manager.start_process("Dashboard", dashboard_cmd)
+    logger.success("Dashboard server started on port 8080")
 
 
 # ============================================================================
-# MONITORING DASHBOARD
-# ============================================================================
-
-def display_dashboard_info(tunnel_url: Optional[str] = None):
-    """Display dashboard access information"""
-    logger.info("\n" + "="*70)
-    logger.info("📊 DASHBOARD ACCESS")
-    logger.info("="*70)
-    
-    if tunnel_url:
-        logger.info(f"\n🌐 Public API URL: {tunnel_url}")
-        logger.info(f"📖 API Documentation: {tunnel_url}/docs")
-        logger.info(f"📈 Metrics: {tunnel_url}/metrics")
-        logger.info(f"💚 Health Check: {tunnel_url}/api/v1/health")
-        logger.info(f"🤖 Agents List: {tunnel_url}/api/v1/agents")
-    
-    logger.info(f"\n📂 Local Dashboard: file://{Path('dashboard.html').absolute()}")
-    logger.info("\n" + "="*70 + "\n")
-
-
-# ============================================================================
-# MAIN EXECUTION
+# MAIN ORCHESTRATION
 # ============================================================================
 
 async def main():
-    """Main execution flow"""
+    """
+    Main orchestration flow:
+    1. Initialize process manager
+    2. Launch vLLM server
+    3. Start FastAPI service
+    4. Create NGROK tunnels
+    5. Launch dashboard
+    6. Monitor services
+    """
+    
+    logger.info("=" * 70)
+    logger.info("🚀 ENTERPRISE AI ORCHESTRATION SYSTEM - COLAB LAUNCHER")
+    logger.info("=" * 70)
+    
+    process_manager = ProcessManager()
     
     try:
-        # Setup
-        setup_environment()
-        install_dependencies()
+        # Step 1: Launch vLLM Server
+        logger.info("\n[1/5] Launching vLLM Inference Server...")
+        VLLMServer.launch(process_manager)
         
-        if not validate_config():
-            logger.error("Configuration validation failed. Please check .env file.")
-            return
+        # Step 2: Configure NGROK
+        logger.info("\n[2/5] Configuring NGROK...")
+        NGROKManager.setup_auth()
         
-        # Initialize model
-        await initialize_model()
+        # Step 3: Start FastAPI Service
+        logger.info("\n[3/5] Starting FastAPI Service...")
+        api_cmd = [
+            "python", "-m", "uvicorn",
+            "system:app",
+            "--host", config.API_HOST,
+            "--port", str(config.API_PORT),
+            "--log-level", "info"
+        ]
+        process_manager.start_process("FastAPI", api_cmd)
+        time.sleep(10)  # Wait for API to start
         
-        # Start server
-        server = ServerManager()
-        if not server.start():
-            logger.error("Failed to start server")
-            return
+        # Step 4: Create NGROK Tunnels
+        logger.info("\n[4/5] Creating NGROK Tunnels...")
+        api_tunnel = NGROKManager.create_tunnel(config.API_PORT, "api")
+        dashboard_tunnel = NGROKManager.create_tunnel(8080, "dashboard")
         
-        # Display access info
-        display_dashboard_info(server.tunnel.public_url if server.tunnel else None)
+        process_manager.tunnels["api"] = api_tunnel
+        process_manager.tunnels["dashboard"] = dashboard_tunnel
         
-        # Run interactive demo
-        await run_interactive_demo()
+        # Step 5: Launch Dashboard
+        logger.info("\n[5/5] Launching Dashboard...")
+        serve_dashboard(process_manager)
         
-        # Keep server running
-        logger.info("\n🔄 Server running. Press Ctrl+C to stop.\n")
-        logger.info("💡 Use the API endpoints to interact with agents:")
-        logger.info("   - POST /api/v1/task - Execute agent task")
-        logger.info("   - GET /api/v1/health - Health check")
-        logger.info("   - GET /api/v1/agents - List agents\n")
+        # Display access URLs
+        logger.info("\n" + "=" * 70)
+        logger.success("✅ ALL SERVICES RUNNING")
+        logger.info("=" * 70)
+        logger.info(f"\n📡 API Endpoint:       {api_tunnel}")
+        logger.info(f"📊 Dashboard:          {dashboard_tunnel}/dashboard.html")
+        logger.info(f"📚 API Docs:           {api_tunnel}/docs")
+        logger.info(f"🔍 Health Check:       {api_tunnel}/health")
+        logger.info("\n" + "=" * 70)
         
-        # Keep alive
-        try:
-            while True:
-                await asyncio.sleep(60)
-                logger.info("💓 System heartbeat - All systems operational")
-        except KeyboardInterrupt:
-            logger.info("\n⚠️ Shutdown signal received")
+        # Monitor services
+        logger.info("\n🔄 Monitoring services (Press Ctrl+C to stop)...\n")
         
+        while True:
+            await asyncio.sleep(10)
+            
+            # Check service health
+            for name in ["vLLM", "FastAPI", "Dashboard"]:
+                if not process_manager.is_alive(name):
+                    logger.error(f"❌ {name} process died!")
+            
+    except KeyboardInterrupt:
+        logger.warning("\n⚠️  Shutdown requested by user")
+    
     except Exception as e:
-        logger.error(f"❌ Fatal error: {e}", exc_info=True)
+        logger.error(f"❌ Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
     
     finally:
-        # Cleanup
-        if 'server' in locals():
-            server.stop()
-        logger.info("👋 Shutdown complete")
+        process_manager.shutdown_all()
+        logger.info("👋 Goodbye!")
 
 
 # ============================================================================
@@ -365,14 +372,13 @@ async def main():
 # ============================================================================
 
 if __name__ == "__main__":
-    """Entry point for Colab execution"""
+    # Configure logging
+    logger.remove()
+    logger.add(
+        sys.stdout,
+        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
+        level="INFO"
+    )
     
-    print("""
-    ╔══════════════════════════════════════════════════════════════╗
-    ║  ENTERPRISE AI MULTI-AGENT ORCHESTRATION SYSTEM              ║
-    ║  Production-Grade Agentic Platform                           ║
-    ╚══════════════════════════════════════════════════════════════╝
-    """)
-    
-    # Run main async function
+    # Run main orchestration
     asyncio.run(main())
