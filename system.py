@@ -101,7 +101,7 @@ class AICore:
     """Central orchestrator for multi-agent system."""
     
     def __init__(self):
-        self.model_name = os.getenv('MODEL_NAME', 'Qwen/Qwen2.5-1.5B-Instruct')
+        self.model_name = os.getenv('MODEL_NAME', 'Qwen/Qwen3-1.7B')
         self.api_base = os.getenv('MODEL_SERVER', 'http://localhost:8001')
         self.api_key = os.getenv('API_KEY', 'dummy-key')
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
