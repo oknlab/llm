@@ -3,338 +3,262 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Enterprise AI Multi-Agent System - Control Dashboard</title>
+    <title>AI Orchestration System - Dashboard</title>
     <style>
-        :root {
-            --primary: #0066cc;
-            --success: #00a86b;
-            --warning: #ff9500;
-            --danger: #ff3b30;
-            --dark: #1c1c1e;
-            --light: #f2f2f7;
-            --border: #d1d1d6;
-        }
-        
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-        
+
+        :root {
+            --primary: #2563eb;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --dark: #1f2937;
+            --light: #f3f4f6;
+            --border: #e5e7eb;
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
             padding: 20px;
         }
-        
+
         .container {
             max-width: 1400px;
             margin: 0 auto;
         }
-        
-        header {
+
+        .header {
             background: white;
             border-radius: 12px;
             padding: 30px;
             margin-bottom: 20px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }
-        
-        h1 {
+
+        .header h1 {
             color: var(--dark);
-            font-size: 2em;
+            font-size: 2.5em;
             margin-bottom: 10px;
         }
-        
-        .subtitle {
-            color: #666;
+
+        .header p {
+            color: #6b7280;
             font-size: 1.1em;
         }
-        
+
         .status-bar {
-            display: flex;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 15px;
             margin-bottom: 20px;
-            flex-wrap: wrap;
         }
-        
+
         .status-card {
-            flex: 1;
-            min-width: 200px;
             background: white;
             border-radius: 12px;
             padding: 20px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.08);
-            transition: transform 0.2s;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         }
-        
-        .status-card:hover {
-            transform: translateY(-5px);
-        }
-        
+
         .status-card h3 {
             font-size: 0.9em;
-            color: #666;
+            color: #6b7280;
             margin-bottom: 10px;
             text-transform: uppercase;
         }
-        
+
         .status-value {
             font-size: 2em;
             font-weight: bold;
-            color: var(--primary);
+            color: var(--dark);
         }
-        
+
         .status-indicator {
             display: inline-block;
             width: 12px;
             height: 12px;
             border-radius: 50%;
             margin-right: 8px;
-            animation: pulse 2s infinite;
+            animation: pulse 2s ease-in-out infinite;
         }
-        
-        .status-online {
-            background: var(--success);
-        }
-        
+
+        .status-online { background: var(--success); }
+        .status-offline { background: var(--danger); }
+
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
-        
-        .grid {
+
+        .main-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            grid-template-columns: 1fr 1fr;
             gap: 20px;
-            margin-bottom: 20px;
         }
-        
+
         .card {
             background: white;
             border-radius: 12px;
             padding: 25px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.08);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }
-        
+
         .card h2 {
             color: var(--dark);
             margin-bottom: 20px;
-            font-size: 1.3em;
-            border-bottom: 2px solid var(--light);
+            font-size: 1.5em;
+            border-bottom: 2px solid var(--border);
             padding-bottom: 10px;
         }
-        
-        .agent-list {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
+
+        .query-form {
+            margin-bottom: 20px;
         }
-        
-        .agent-item {
+
+        .input-group {
+            position: relative;
+            margin-bottom: 15px;
+        }
+
+        textarea, input {
+            width: 100%;
             padding: 15px;
-            background: var(--light);
-            border-radius: 8px;
-            border-left: 4px solid var(--primary);
-            transition: all 0.3s;
-            cursor: pointer;
-        }
-        
-        .agent-item:hover {
-            background: #e8e8ed;
-            transform: translateX(5px);
-        }
-        
-        .agent-name {
-            font-weight: bold;
-            color: var(--dark);
-            margin-bottom: 5px;
-        }
-        
-        .agent-desc {
-            font-size: 0.9em;
-            color: #666;
-        }
-        
-        .task-form {
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-        }
-        
-        .form-group {
-            display: flex;
-            flex-direction: column;
-        }
-        
-        label {
-            margin-bottom: 5px;
-            font-weight: 600;
-            color: var(--dark);
-        }
-        
-        input, select, textarea {
-            padding: 12px;
             border: 2px solid var(--border);
             border-radius: 8px;
             font-size: 1em;
             font-family: inherit;
             transition: border-color 0.3s;
         }
-        
-        input:focus, select:focus, textarea:focus {
+
+        textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+
+        textarea:focus, input:focus {
             outline: none;
             border-color: var(--primary);
         }
-        
-        textarea {
-            min-height: 120px;
-            resize: vertical;
-        }
-        
-        button {
-            padding: 14px 28px;
+
+        .btn {
             background: var(--primary);
             color: white;
             border: none;
+            padding: 15px 30px;
             border-radius: 8px;
             font-size: 1em;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.3s;
+            transition: background 0.3s, transform 0.1s;
+            width: 100%;
         }
-        
-        button:hover {
-            background: #0052a3;
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,102,204,0.3);
+
+        .btn:hover {
+            background: #1d4ed8;
         }
-        
-        button:active {
-            transform: translateY(0);
+
+        .btn:active {
+            transform: scale(0.98);
         }
-        
-        button:disabled {
-            background: #ccc;
+
+        .btn:disabled {
+            background: #9ca3af;
             cursor: not-allowed;
-            transform: none;
         }
-        
-        .response-area {
-            margin-top: 20px;
-            padding: 20px;
-            background: #f8f9fa;
+
+        .response-container {
+            background: var(--light);
             border-radius: 8px;
-            border-left: 4px solid var(--success);
-            display: none;
-        }
-        
-        .response-area.show {
-            display: block;
-            animation: slideIn 0.3s;
-        }
-        
-        @keyframes slideIn {
-            from {
-                opacity: 0;
-                transform: translateY(-10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        
-        .response-header {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid var(--border);
-        }
-        
-        .response-content {
-            background: white;
-            padding: 15px;
-            border-radius: 6px;
-            font-family: 'Courier New', monospace;
-            white-space: pre-wrap;
-            max-height: 400px;
+            padding: 20px;
+            margin-top: 15px;
+            max-height: 500px;
             overflow-y: auto;
         }
-        
-        .badge {
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 12px;
-            font-size: 0.85em;
-            font-weight: 600;
+
+        .agent-output {
+            background: white;
+            border-left: 4px solid var(--primary);
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 4px;
         }
-        
-        .badge-success {
-            background: #d4edda;
-            color: #155724;
+
+        .agent-output h4 {
+            color: var(--primary);
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
         }
-        
-        .badge-error {
-            background: #f8d7da;
-            color: #721c24;
-        }
-        
-        .badge-info {
-            background: #d1ecf1;
-            color: #0c5460;
-        }
-        
-        .loader {
-            border: 4px solid var(--light);
-            border-top: 4px solid var(--primary);
+
+        .agent-icon {
+            width: 24px;
+            height: 24px;
+            background: var(--primary);
+            color: white;
             border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 20px auto;
-            display: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 10px;
+            font-size: 0.8em;
         }
-        
-        .loader.show {
+
+        .agent-list {
+            list-style: none;
+        }
+
+        .agent-item {
+            background: var(--light);
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 8px;
+            border-left: 4px solid var(--success);
+        }
+
+        .agent-item strong {
             display: block;
+            color: var(--dark);
+            margin-bottom: 5px;
         }
-        
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
+
+        .agent-item small {
+            color: #6b7280;
         }
-        
+
         .metrics-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            grid-template-columns: repeat(2, 1fr);
             gap: 15px;
         }
-        
-        .metric-box {
+
+        .metric {
             background: var(--light);
             padding: 15px;
             border-radius: 8px;
             text-align: center;
         }
-        
+
         .metric-value {
-            font-size: 1.8em;
+            font-size: 2em;
             font-weight: bold;
             color: var(--primary);
         }
-        
+
         .metric-label {
-            font-size: 0.85em;
-            color: #666;
+            color: #6b7280;
             margin-top: 5px;
+            font-size: 0.9em;
         }
-        
-        .log-container {
-            background: #1e1e1e;
-            color: #d4d4d4;
+
+        .logs-container {
+            background: #1f2937;
+            color: #f3f4f6;
             padding: 20px;
             border-radius: 8px;
             font-family: 'Courier New', monospace;
@@ -342,347 +266,371 @@
             max-height: 300px;
             overflow-y: auto;
         }
-        
+
         .log-entry {
             margin-bottom: 8px;
             padding: 5px;
             border-left: 3px solid transparent;
         }
-        
-        .log-info { border-left-color: #4ec9b0; }
-        .log-warning { border-left-color: #dcdcaa; }
-        .log-error { border-left-color: #f48771; }
-        
-        .timestamp {
-            color: #858585;
-            margin-right: 10px;
+
+        .log-info { border-color: var(--primary); }
+        .log-success { border-color: var(--success); }
+        .log-warning { border-color: var(--warning); }
+        .log-error { border-color: var(--danger); }
+
+        .spinner {
+            border: 3px solid var(--border);
+            border-top: 3px solid var(--primary);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 1024px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <header>
-            <h1>🤖 Enterprise AI Multi-Agent System</h1>
-            <p class="subtitle">Production-Grade Agentic Orchestration Platform</p>
-        </header>
+        <!-- Header -->
+        <div class="header">
+            <h1>🤖 AI Orchestration System</h1>
+            <p>Enterprise Multi-Agent Architecture with Agentic RAG</p>
+        </div>
 
+        <!-- Status Bar -->
         <div class="status-bar">
             <div class="status-card">
                 <h3>System Status</h3>
                 <div class="status-value">
-                    <span class="status-indicator status-online"></span>
-                    <span id="systemStatus">Online</span>
+                    <span class="status-indicator status-online" id="statusIndicator"></span>
+                    <span id="statusText">ONLINE</span>
                 </div>
             </div>
             <div class="status-card">
                 <h3>Active Agents</h3>
-                <div class="status-value" id="activeAgents">6</div>
+                <div class="status-value" id="agentCount">6</div>
             </div>
             <div class="status-card">
-                <h3>Tasks Processed</h3>
-                <div class="status-value" id="tasksProcessed">0</div>
+                <h3>Total Queries</h3>
+                <div class="status-value" id="queryCount">0</div>
             </div>
             <div class="status-card">
-                <h3>Success Rate</h3>
-                <div class="status-value" id="successRate">100%</div>
+                <h3>Avg Response Time</h3>
+                <div class="status-value" id="avgTime">0s</div>
             </div>
         </div>
 
-        <div class="grid">
+        <!-- Main Grid -->
+        <div class="main-grid">
+            <!-- Query Interface -->
             <div class="card">
-                <h2>🎯 Available Agents</h2>
-                <div class="agent-list" id="agentList">
-                    <div class="agent-item" data-type="code">
-                        <div class="agent-name">CodeArchitect</div>
-                        <div class="agent-desc">Code generation, architecture, optimization</div>
+                <h2>💬 Query Interface</h2>
+                <div class="query-form">
+                    <div class="input-group">
+                        <textarea 
+                            id="queryInput" 
+                            placeholder="Enter your query here... (e.g., 'Design a secure REST API with authentication')"
+                        ></textarea>
                     </div>
-                    <div class="agent-item" data-type="security">
-                        <div class="agent-name">SecAnalyst</div>
-                        <div class="agent-desc">Security auditing, pen testing, threat modeling</div>
-                    </div>
-                    <div class="agent-item" data-type="automation">
-                        <div class="agent-name">AutoBot</div>
-                        <div class="agent-desc">Workflow automation, API integration</div>
-                    </div>
-                    <div class="agent-item" data-type="admin">
-                        <div class="agent-name">AgentSuite</div>
-                        <div class="agent-desc">Admin operations, reporting, analytics</div>
-                    </div>
-                    <div class="agent-item" data-type="content">
-                        <div class="agent-name">CreativeAgent</div>
-                        <div class="agent-desc">Content generation, copywriting</div>
-                    </div>
-                    <div class="agent-item" data-type="custom">
-                        <div class="agent-name">AgCustom</div>
-                        <div class="agent-desc">Custom agent solutions</div>
-                    </div>
+                    <button class="btn" id="submitBtn" onclick="submitQuery()">
+                        🚀 Execute Query
+                    </button>
+                </div>
+
+                <div id="responseSection" style="display: none;">
+                    <h3>Response:</h3>
+                    <div class="response-container" id="responseContainer"></div>
                 </div>
             </div>
 
+            <!-- Agent Status -->
             <div class="card">
-                <h2>📝 Execute Task</h2>
-                <form class="task-form" id="taskForm">
-                    <div class="form-group">
-                        <label for="apiUrl">API Endpoint</label>
-                        <input type="text" id="apiUrl" placeholder="http://localhost:8080" required>
+                <h2>🔧 Active Agents</h2>
+                <ul class="agent-list">
+                    <li class="agent-item">
+                        <strong>CodeArchitect</strong>
+                        <small>Python, JS, Rust, Go | API Design | Algorithms</small>
+                    </li>
+                    <li class="agent-item">
+                        <strong>SecAnalyst</strong>
+                        <small>Penetration Testing | Threat Modeling | Audits</small>
+                    </li>
+                    <li class="agent-item">
+                        <strong>AutoBot</strong>
+                        <small>Airflow | API Integration | Data Pipelines</small>
+                    </li>
+                    <li class="agent-item">
+                        <strong>AgentSuite</strong>
+                        <small>Finance | Reporting | Operations Automation</small>
+                    </li>
+                    <li class="agent-item">
+                        <strong>CreativeAgent</strong>
+                        <small>Content | Text | Audio | Visual Assets</small>
+                    </li>
+                    <li class="agent-item">
+                        <strong>AgCustom</strong>
+                        <small>Custom Solutions | Specialized Workflows</small>
+                    </li>
+                </ul>
+            </div>
+
+            <!-- Performance Metrics -->
+            <div class="card">
+                <h2>📊 Performance Metrics</h2>
+                <div class="metrics-grid">
+                    <div class="metric">
+                        <div class="metric-value" id="relevanceScore">0%</div>
+                        <div class="metric-label">Relevance Score</div>
                     </div>
-                    
-                    <div class="form-group">
-                        <label for="taskType">Task Type</label>
-                        <select id="taskType" required>
-                            <option value="code">Code Development</option>
-                            <option value="security">Security Analysis</option>
-                            <option value="automation">Automation</option>
-                            <option value="admin">Administration</option>
-                            <option value="content">Content Creation</option>
-                            <option value="custom">Custom Task</option>
-                        </select>
+                    <div class="metric">
+                        <div class="metric-value" id="groundScore">0%</div>
+                        <div class="metric-label">Groundedness</div>
                     </div>
-                    
-                    <div class="form-group">
-                        <label for="taskDescription">Task Description</label>
-                        <textarea id="taskDescription" placeholder="Describe your task in detail..." required></textarea>
+                    <div class="metric">
+                        <div class="metric-value" id="completeScore">0%</div>
+                        <div class="metric-label">Completeness</div>
                     </div>
-                    
-                    <div class="form-group">
-                        <label>
-                            <input type="checkbox" id="enableRAG" checked>
-                            Enable RAG Context Enrichment
-                        </label>
+                    <div class="metric">
+                        <div class="metric-value" id="docsRetrieved">0</div>
+                        <div class="metric-label">Docs Retrieved</div>
                     </div>
-                    
-                    <button type="submit" id="submitBtn">Execute Task</button>
-                </form>
-                
-                <div class="loader" id="loader"></div>
-                
-                <div class="response-area" id="responseArea">
-                    <div class="response-header">
-                        <div>
-                            <strong>Agent:</strong> <span id="responseAgent" class="badge badge-info"></span>
-                            <strong>Status:</strong> <span id="responseStatus"></span>
-                        </div>
-                        <div>
-                            <strong>RAG Contexts:</strong> <span id="ragContexts">0</span>
-                        </div>
-                    </div>
-                    <div class="response-content" id="responseContent"></div>
                 </div>
             </div>
-        </div>
 
-        <div class="card">
-            <h2>📊 System Metrics</h2>
-            <div class="metrics-grid">
-                <div class="metric-box">
-                    <div class="metric-value" id="metricRequests">0</div>
-                    <div class="metric-label">Total Requests</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-value" id="metricAvgTime">0ms</div>
-                    <div class="metric-label">Avg Response Time</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-value" id="metricRAGQueries">0</div>
-                    <div class="metric-label">RAG Queries</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-value" id="metricErrors">0</div>
-                    <div class="metric-label">Errors</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="card">
-            <h2>📜 System Logs</h2>
-            <div class="log-container" id="logContainer">
-                <div class="log-entry log-info">
-                    <span class="timestamp">[2024-01-01 00:00:00]</span>
-                    System initialized successfully
-                </div>
-                <div class="log-entry log-info">
-                    <span class="timestamp">[2024-01-01 00:00:01]</span>
-                    All agents online and ready
+            <!-- System Logs -->
+            <div class="card">
+                <h2>📋 System Logs</h2>
+                <div class="logs-container" id="logsContainer">
+                    <div class="log-entry log-success">✓ System initialized</div>
+                    <div class="log-entry log-info">→ Waiting for queries...</div>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
-        // State management
-        let state = {
-            tasksProcessed: 0,
-            successCount: 0,
-            totalRequests: 0,
-            ragQueries: 0,
-            errors: 0,
-            responseTimes: []
-        };
+        // Configuration
+        const API_BASE_URL = window.location.origin;
+        let queryCounter = 0;
+        let responseTimes = [];
 
-        // Agent selection
-        document.querySelectorAll('.agent-item').forEach(item => {
-            item.addEventListener('click', function() {
-                const type = this.dataset.type;
-                document.getElementById('taskType').value = type;
-                
-                document.querySelectorAll('.agent-item').forEach(el => el.style.borderLeftColor = 'var(--primary)');
-                this.style.borderLeftColor = 'var(--success)';
-            });
-        });
+        // WebSocket Connection
+        let ws = null;
 
-        // Form submission
-        document.getElementById('taskForm').addEventListener('submit', async function(e) {
-            e.preventDefault();
-            
-            const apiUrl = document.getElementById('apiUrl').value;
-            const taskType = document.getElementById('taskType').value;
-            const taskDescription = document.getElementById('taskDescription').value;
-            const enableRAG = document.getElementById('enableRAG').checked;
-            
-            // Show loader
-            document.getElementById('loader').classList.add('show');
-            document.getElementById('submitBtn').disabled = true;
-            document.getElementById('responseArea').classList.remove('show');
-            
-            addLog('info', `Executing ${taskType} task...`);
-            
+        function connectWebSocket() {
+            const wsUrl = `ws://${window.location.host}/ws`;
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                addLog('WebSocket connected', 'success');
+            };
+
+            ws.onmessage = (event) => {
+                const result = JSON.parse(event.data);
+                displayResults(result);
+            };
+
+            ws.onerror = () => {
+                addLog('WebSocket error, falling back to HTTP', 'warning');
+            };
+
+            ws.onclose = () => {
+                addLog('WebSocket disconnected', 'warning');
+                setTimeout(connectWebSocket, 5000);
+            };
+        }
+
+        // Initialize WebSocket
+        connectWebSocket();
+
+        // Submit Query
+        async function submitQuery() {
+            const queryInput = document.getElementById('queryInput');
+            const submitBtn = document.getElementById('submitBtn');
+            const query = queryInput.value.trim();
+
+            if (!query) {
+                alert('Please enter a query');
+                return;
+            }
+
+            // Disable button
+            submitBtn.disabled = true;
+            submitBtn.textContent = '⏳ Processing...';
+
+            // Show loading
+            const responseContainer = document.getElementById('responseContainer');
+            responseContainer.innerHTML = '<div class="spinner"></div>';
+            document.getElementById('responseSection').style.display = 'block';
+
+            addLog(`Processing query: ${query.substring(0, 50)}...`, 'info');
+
             const startTime = Date.now();
-            
+
             try {
-                const response = await fetch(`${apiUrl}/api/v1/task`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        task: taskDescription,
-                        task_type: taskType,
-                        enable_rag: enableRAG
-                    })
-                });
-                
-                const data = await response.json();
-                const responseTime = Date.now() - startTime;
-                
-                // Update state
-                state.tasksProcessed++;
-                state.totalRequests++;
-                state.responseTimes.push(responseTime);
-                
-                if (data.status === 'success') {
-                    state.successCount++;
+                // Use WebSocket if available, else HTTP
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ query }));
+                } else {
+                    const response = await fetch(`${API_BASE_URL}/api/query`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ query })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+
+                    const result = await response.json();
+                    displayResults(result);
                 }
-                
-                if (enableRAG) {
-                    state.ragQueries++;
-                }
-                
-                // Display response
-                displayResponse(data);
-                updateMetrics();
-                
-                addLog('info', `Task completed in ${responseTime}ms`);
-                
+
+                const endTime = Date.now();
+                const duration = ((endTime - startTime) / 1000).toFixed(2);
+                responseTimes.push(parseFloat(duration));
+
+                // Update stats
+                queryCounter++;
+                updateStats();
+
+                addLog(`Query completed in ${duration}s`, 'success');
+
             } catch (error) {
-                state.errors++;
-                addLog('error', `Request failed: ${error.message}`);
-                displayError(error.message);
+                addLog(`Error: ${error.message}`, 'error');
+                responseContainer.innerHTML = `<div class="agent-output" style="border-color: var(--danger);">
+                    <h4>❌ Error</h4>
+                    <p>${error.message}</p>
+                </div>`;
             } finally {
-                document.getElementById('loader').classList.remove('show');
-                document.getElementById('submitBtn').disabled = false;
+                submitBtn.disabled = false;
+                submitBtn.textContent = '🚀 Execute Query';
+            }
+        }
+
+        // Display Results
+        function displayResults(result) {
+            const responseContainer = document.getElementById('responseContainer');
+            
+            let html = `
+                <div class="agent-output" style="border-color: var(--success);">
+                    <h4><span class="agent-icon">✓</span>Final Answer</h4>
+                    <p>${escapeHtml(result.final_answer)}</p>
+                </div>
+            `;
+
+            // Agent outputs
+            if (result.agent_outputs && Object.keys(result.agent_outputs).length > 0) {
+                html += '<h3 style="margin-top: 20px; color: var(--dark);">Agent Contributions:</h3>';
+                
+                for (const [agent, output] of Object.entries(result.agent_outputs)) {
+                    html += `
+                        <div class="agent-output">
+                            <h4><span class="agent-icon">${agent[0]}</span>${agent}</h4>
+                            <p>${escapeHtml(output.response)}</p>
+                        </div>
+                    `;
+                }
+            }
+
+            responseContainer.innerHTML = html;
+
+            // Update metrics
+            if (result.metadata && result.metadata.quality_metrics) {
+                const metrics = result.metadata.quality_metrics;
+                document.getElementById('relevanceScore').textContent = 
+                    `${(metrics.relevance_score * 100).toFixed(0)}%`;
+                document.getElementById('groundScore').textContent = 
+                    `${(metrics.groundedness_score * 100).toFixed(0)}%`;
+                document.getElementById('completeScore').textContent = 
+                    `${(metrics.completeness_score * 100).toFixed(0)}%`;
+            }
+
+            if (result.context) {
+                document.getElementById('docsRetrieved').textContent = result.context.length;
+            }
+        }
+
+        // Update Statistics
+        function updateStats() {
+            document.getElementById('queryCount').textContent = queryCounter;
+
+            if (responseTimes.length > 0) {
+                const avg = responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length;
+                document.getElementById('avgTime').textContent = `${avg.toFixed(2)}s`;
+            }
+        }
+
+        // Add Log Entry
+        function addLog(message, type = 'info') {
+            const logsContainer = document.getElementById('logsContainer');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.className = `log-entry log-${type}`;
+            
+            const icon = {
+                'info': '→',
+                'success': '✓',
+                'warning': '⚠',
+                'error': '✗'
+            }[type] || '•';
+            
+            logEntry.textContent = `[${timestamp}] ${icon} ${message}`;
+            logsContainer.insertBefore(logEntry, logsContainer.firstChild);
+
+            // Keep only last 50 logs
+            while (logsContainer.children.length > 50) {
+                logsContainer.removeChild(logsContainer.lastChild);
+            }
+        }
+
+        // Utility Functions
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Health Check
+        async function checkHealth() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/health`);
+                if (response.ok) {
+                    document.getElementById('statusIndicator').className = 'status-indicator status-online';
+                    document.getElementById('statusText').textContent = 'ONLINE';
+                } else {
+                    throw new Error('Health check failed');
+                }
+            } catch (error) {
+                document.getElementById('statusIndicator').className = 'status-indicator status-offline';
+                document.getElementById('statusText').textContent = 'OFFLINE';
+                addLog('System health check failed', 'error');
+            }
+        }
+
+        // Initialize
+        checkHealth();
+        setInterval(checkHealth, 30000); // Check every 30s
+
+        // Keyboard shortcuts
+        document.getElementById('queryInput').addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'Enter') {
+                submitQuery();
             }
         });
-
-        function displayResponse(data) {
-            const responseArea = document.getElementById('responseArea');
-            const statusBadge = document.getElementById('responseStatus');
-            
-            document.getElementById('responseAgent').textContent = data.agent || 'Unknown';
-            document.getElementById('ragContexts').textContent = data.context_used || 0;
-            document.getElementById('responseContent').textContent = data.output || 'No output';
-            
-            if (data.status === 'success') {
-                statusBadge.className = 'badge badge-success';
-                statusBadge.textContent = 'Success';
-            } else {
-                statusBadge.className = 'badge badge-error';
-                statusBadge.textContent = 'Error';
-            }
-            
-            responseArea.classList.add('show');
-        }
-
-        function displayError(message) {
-            const responseArea = document.getElementById('responseArea');
-            document.getElementById('responseAgent').textContent = 'System';
-            document.getElementById('responseStatus').className = 'badge badge-error';
-            document.getElementById('responseStatus').textContent = 'Error';
-            document.getElementById('responseContent').textContent = message;
-            responseArea.classList.add('show');
-        }
-
-        function updateMetrics() {
-            document.getElementById('tasksProcessed').textContent = state.tasksProcessed;
-            
-            const successRate = state.totalRequests > 0 
-                ? Math.round((state.successCount / state.totalRequests) * 100) 
-                : 100;
-            document.getElementById('successRate').textContent = successRate + '%';
-            
-            document.getElementById('metricRequests').textContent = state.totalRequests;
-            
-            const avgTime = state.responseTimes.length > 0
-                ? Math.round(state.responseTimes.reduce((a, b) => a + b, 0) / state.responseTimes.length)
-                : 0;
-            document.getElementById('metricAvgTime').textContent = avgTime + 'ms';
-            
-            document.getElementById('metricRAGQueries').textContent = state.ragQueries;
-            document.getElementById('metricErrors').textContent = state.errors;
-        }
-
-        function addLog(level, message) {
-            const logContainer = document.getElementById('logContainer');
-            const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
-            
-            const logEntry = document.createElement('div');
-            logEntry.className = `log-entry log-${level}`;
-            logEntry.innerHTML = `<span class="timestamp">[${timestamp}]</span>${message}`;
-            
-            logContainer.appendChild(logEntry);
-            logContainer.scrollTop = logContainer.scrollHeight;
-            
-            // Keep only last 50 logs
-            while (logContainer.children.length > 50) {
-                logContainer.removeChild(logContainer.firstChild);
-            }
-        }
-
-        // Health check
-        async function checkHealth() {
-            const apiUrl = document.getElementById('apiUrl').value;
-            if (!apiUrl) return;
-            
-            try {
-                const response = await fetch(`${apiUrl}/api/v1/health`);
-                const data = await response.json();
-                
-                if (data.status === 'healthy') {
-                    document.getElementById('systemStatus').textContent = 'Online';
-                    document.getElementById('activeAgents').textContent = data.agents.length;
-                    addLog('info', 'Health check passed');
-                }
-            } catch (error) {
-                document.getElementById('systemStatus').textContent = 'Offline';
-                addLog('warning', 'Health check failed');
-            }
-        }
-
-        // Auto health check every 30 seconds
-        setInterval(checkHealth, 30000);
-
-        // Initial setup
-        addLog('info', 'Dashboard loaded successfully');
-        addLog('info', 'Enter API endpoint and start executing tasks');
     </script>
 </body>
 </html>
