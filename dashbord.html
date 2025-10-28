@@ -50,7 +50,24 @@
             background: linear-gradient(90deg, var(--highlight), #f1f1f1);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+            background-clip: text;
             margin-bottom: 10px;
+        }
+        
+        .connection-status {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 0.9rem;
+            margin-top: 10px;
+        }
+        
+        .status-online {
+            background: var(--success);
+        }
+        
+        .status-offline {
+            background: var(--error);
         }
         
         .stats-grid {
@@ -163,6 +180,11 @@
             transform: scale(1.05);
         }
         
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
         .btn-secondary {
             background: var(--accent);
         }
@@ -227,16 +249,6 @@
             background: var(--error);
         }
         
-        .performance-chart {
-            height: 300px;
-            background: rgba(26, 26, 46, 0.3);
-            border-radius: 8px;
-            padding: 20px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        
         .loading {
             display: inline-block;
             width: 20px;
@@ -263,6 +275,10 @@
             z-index: 1000;
         }
         
+        .notification.error {
+            background: var(--error);
+        }
+        
         @keyframes slideIn {
             from {
                 transform: translateX(100%);
@@ -273,6 +289,27 @@
                 opacity: 1;
             }
         }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 999;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .modal-content {
+            background: var(--secondary);
+            padding: 30px;
+            border-radius: 10px;
+            max-width: 500px;
+            width: 90%;
+        }
     </style>
 </head>
 <body>
@@ -280,6 +317,7 @@
         <header>
             <h1>AI Agents Platform</h1>
             <p>Enterprise-Grade Multi-Agent Orchestration System</p>
+            <span class="connection-status" id="connectionStatus">Connecting...</span>
         </header>
         
         <div class="stats-grid">
@@ -296,13 +334,13 @@
                 <div class="stat-label">Avg Response Time</div>
             </div>
             <div class="stat-card">
-                <div class="stat-value" id="systemHealth">Online</div>
+                <div class="stat-value" id="systemHealth">Checking...</div>
                 <div class="stat-label">System Status</div>
             </div>
         </div>
         
         <div class="control-panel">
-            <button class="btn" onclick="createAgent()">Create Agent</button>
+            <button class="btn" onclick="showCreateAgentModal()">Create Agent</button>
             <button class="btn btn-secondary" onclick="refreshAgents()">Refresh</button>
             <button class="btn btn-secondary" onclick="ingestData()">Ingest Data</button>
         </div>
@@ -332,16 +370,42 @@
             
             <div class="task-list" id="taskList"></div>
         </div>
-        
-        <div class="performance-chart">
-            <canvas id="performanceChart"></canvas>
+    </div>
+    
+    <!-- Create Agent Modal -->
+    <div id="createAgentModal" class="modal">
+        <div class="modal-content">
+            <h2>Create New Agent</h2>
+            <br>
+            <select id="newAgentType">
+                <option value="CODE_ARCHITECT">Code Architect</option>
+                <option value="SEC_ANALYST">Security Analyst</option>
+                <option value="AUTO_BOT">Automation Bot</option>
+                <option value="AGENT_SUITE">Agent Suite</option>
+                <option value="CREATIVE_AGENT">Creative Agent</option>
+            </select>
+            <input type="text" id="newAgentCapabilities" placeholder="Capabilities (comma-separated)">
+            <br><br>
+            <button class="btn" onclick="createAgent()">Create</button>
+            <button class="btn btn-secondary" onclick="hideCreateAgentModal()">Cancel</button>
         </div>
     </div>
     
     <script>
-        const API_BASE = 'http://localhost:8000';
+        // Dynamically determine API URL
+        const getAPIBase = () => {
+            const port = localStorage.getItem('API_PORT') || '8000';
+            if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+                return `http://localhost:${port}`;
+            }
+            // For Colab or remote access
+            return `${window.location.protocol}//${window.location.hostname}:${port}`;
+        };
+        
+        const API_BASE = getAPIBase();
         let agents = [];
         let tasks = [];
+        let isConnected = false;
         
         async function fetchAPI(endpoint, options = {}) {
             try {
@@ -352,11 +416,35 @@
                         ...options.headers
                     }
                 });
-                return await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                if (!isConnected) {
+                    isConnected = true;
+                    updateConnectionStatus(true);
+                }
+                
+                return data;
             } catch (error) {
                 console.error('API Error:', error);
-                showNotification('API Error', 'error');
+                updateConnectionStatus(false);
+                showNotification(`API Error: ${error.message}`, 'error');
                 return null;
+            }
+        }
+        
+        function updateConnectionStatus(connected) {
+            const status = document.getElementById('connectionStatus');
+            if (connected) {
+                status.textContent = 'Connected';
+                status.className = 'connection-status status-online';
+            } else {
+                status.textContent = 'Disconnected';
+                status.className = 'connection-status status-offline';
             }
         }
         
@@ -372,11 +460,18 @@
         
         function updateAgentGrid() {
             const grid = document.getElementById('agentGrid');
+            
+            if (agents.length === 0) {
+                grid.innerHTML = '<p>No agents active. Create one to get started.</p>';
+                return;
+            }
+            
             grid.innerHTML = agents.map(agent => `
                 <div class="agent-card">
                     <div class="agent-type">${agent.type}</div>
                     <div>ID: ${agent.id}</div>
                     <div>Tasks: ${agent.metrics.tasks_completed}</div>
+                    <div>Success Rate: ${(agent.metrics.success_rate * 100).toFixed(1)}%</div>
                     <div>Avg Time: ${agent.metrics.avg_response_time.toFixed(2)}s</div>
                     <div class="agent-capabilities">
                         ${agent.capabilities.map(cap => 
@@ -402,31 +497,44 @@
             );
             document.getElementById('tasksCompleted').textContent = totalTasks;
             
-            const avgTime = agents.reduce((sum, agent) => 
+            const avgTime = agents.length > 0 ? agents.reduce((sum, agent) => 
                 sum + agent.metrics.avg_response_time, 0
-            ) / agents.length || 0;
+            ) / agents.length : 0;
             document.getElementById('avgResponseTime').textContent = 
                 `${(avgTime * 1000).toFixed(0)}ms`;
         }
         
+        function showCreateAgentModal() {
+            document.getElementById('createAgentModal').style.display = 'flex';
+        }
+        
+        function hideCreateAgentModal() {
+            document.getElementById('createAgentModal').style.display = 'none';
+        }
+        
         async function createAgent() {
-            const agentType = prompt('Agent Type (CodeArchitect/SecAnalyst/AutoBot/AgentSuite/CreativeAgent):');
-            const capabilities = prompt('Capabilities (comma-separated):');
+            const agentType = document.getElementById('newAgentType').value;
+            const capabilities = document.getElementById('newAgentCapabilities').value;
             
-            if (agentType && capabilities) {
-                const data = await fetchAPI('/agents/create', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        agent_type: agentType,
-                        capabilities: capabilities.split(',').map(c => c.trim()),
-                        config_overrides: {}
-                    })
-                });
-                
-                if (data) {
-                    showNotification('Agent created successfully');
-                    refreshAgents();
-                }
+            if (!capabilities) {
+                showNotification('Please enter capabilities', 'error');
+                return;
+            }
+            
+            const data = await fetchAPI('/agents/create', {
+                method: 'POST',
+                body: JSON.stringify({
+                    agent_type: agentType,
+                    capabilities: capabilities.split(',').map(c => c.trim()),
+                    config_overrides: {}
+                })
+            });
+            
+            if (data) {
+                showNotification('Agent created successfully');
+                hideCreateAgentModal();
+                document.getElementById('newAgentCapabilities').value = '';
+                refreshAgents();
             }
         }
         
@@ -462,10 +570,21 @@
             const taskList = document.getElementById('taskList');
             const taskElement = document.createElement('div');
             taskElement.className = 'task-item';
+            
+            let resultText = '';
+            if (task.result) {
+                if (typeof task.result === 'string') {
+                    resultText = task.result.substring(0, 100) + '...';
+                } else {
+                    resultText = JSON.stringify(task.result).substring(0, 100) + '...';
+                }
+            }
+            
             taskElement.innerHTML = `
                 <div>
                     <strong>Task ${task.task_id}</strong>
                     <div>Time: ${task.execution_time?.toFixed(2)}s</div>
+                    ${resultText ? `<div style="font-size: 0.9rem; opacity: 0.8; margin-top: 5px;">${resultText}</div>` : ''}
                 </div>
                 <span class="status-badge status-${task.status}">
                     ${task.status}
@@ -493,9 +612,7 @@
         
         function showNotification(message, type = 'success') {
             const notification = document.createElement('div');
-            notification.className = 'notification';
-            notification.style.background = type === 'error' ? 
-                'var(--error)' : 'var(--success)';
+            notification.className = type === 'error' ? 'notification error' : 'notification';
             notification.textContent = message;
             document.body.appendChild(notification);
             
@@ -507,15 +624,29 @@
         async function checkHealth() {
             const data = await fetchAPI('/health');
             if (data) {
-                document.getElementById('systemHealth').textContent = 
-                    data.status === 'operational' ? 'Online' : 'Issues';
+                const healthStatus = document.getElementById('systemHealth');
+                healthStatus.textContent = data.status === 'operational' ? 'Online' : 'Issues';
+                
+                // Update model status
+                if (data.model_loaded === false) {
+                    healthStatus.textContent += ' (API Mode)';
+                }
             }
         }
         
         // Initialize dashboard
         document.addEventListener('DOMContentLoaded', () => {
+            // Check for API port in URL params (for Colab)
+            const urlParams = new URLSearchParams(window.location.search);
+            const apiPort = urlParams.get('api_port');
+            if (apiPort) {
+                localStorage.setItem('API_PORT', apiPort);
+            }
+            
             refreshAgents();
             checkHealth();
+            
+            // Periodic updates
             setInterval(refreshAgents, 30000);
             setInterval(checkHealth, 60000);
         });
