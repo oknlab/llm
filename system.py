@@ -1,575 +1,889 @@
 """
-ENTERPRISE MULTI-AGENT SYSTEM - CORE ARCHITECTURE
-Modular, Scalable, Production-Ready Agent Orchestration
+Enterprise AI Agent Orchestration System
+Architecture: Modular, Scalable, Production-Ready
 """
 
-from typing import Dict, List, Optional, Any, Callable
-from dataclasses import dataclass, field
-from enum import Enum
+from __future__ import annotations
+
 import asyncio
 import json
-from datetime import datetime
-from abc import ABC, abstractmethod
-
-from langchain.agents import AgentExecutor, create_openai_functions_agent
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.tools import Tool, StructuredTool
-from langchain_community.chat_models import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
-from langgraph.graph import StateGraph, END
-from pydantic import BaseModel, Field
-from loguru import logger
-import httpx
-from bs4 import BeautifulSoup
-from sentence_transformers import SentenceTransformer
-import chromadb
-from chromadb.config import Settings
-from tenacity import retry, stop_after_attempt, wait_exponential
 import os
+import re
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, List, Optional, TypedDict, Literal
+from urllib.parse import urljoin, urlparse
+
+import chromadb
+import httpx
+import requests
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+from langchain.schema import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+from langgraph.graph import StateGraph, END
+from loguru import logger
+from pydantic import BaseModel, Field
+from sentence_transformers import SentenceTransformer
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+# ============================================
+# CONFIGURATION & SETTINGS
+# ============================================
+
+load_dotenv()
 
 
-# ============================================================================
-# CONFIGURATION & MODELS
-# ============================================================================
+class Config:
+    """Centralized configuration management"""
+    
+    # Model Configuration
+    MODEL_NAME: str = os.getenv("MODEL_NAME", "Qwen/Qwen3-1.7B")
+    MODEL_SERVER: str = os.getenv("MODEL_SERVER", "http://localhost:8000/v1")
+    API_KEY: str = os.getenv("API_KEY", "sk-local")
+    MODEL_MAX_TOKENS: int = int(os.getenv("MODEL_MAX_TOKENS", "2048"))
+    MODEL_TEMPERATURE: float = float(os.getenv("MODEL_TEMPERATURE", "0.7"))
+    
+    # RAG Configuration
+    WEB_SCRAPE_URL: str = os.getenv("WEB_SCRAPE_URL", "")
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+    VECTOR_DB_PATH: str = os.getenv("VECTOR_DB_PATH", "./data/vector_store")
+    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "512"))
+    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "50"))
+    MAX_SEARCH_RESULTS: int = int(os.getenv("MAX_SEARCH_RESULTS", "10"))
+    
+    # Agent Configuration
+    MAX_AGENT_ITERATIONS: int = int(os.getenv("MAX_AGENT_ITERATIONS", "15"))
+    AGENT_TIMEOUT: int = int(os.getenv("AGENT_TIMEOUT", "300"))
+    
+    # Paths
+    CACHE_DIR: Path = Path(os.getenv("CACHE_DIR", "./cache"))
+    DATA_DIR: Path = Path(os.getenv("DATA_DIR", "./data"))
+    LOGS_DIR: Path = Path(os.getenv("LOGS_DIR", "./logs"))
+    
+    @classmethod
+    def setup_directories(cls):
+        """Create required directories"""
+        for dir_path in [cls.CACHE_DIR, cls.DATA_DIR, cls.LOGS_DIR]:
+            dir_path.mkdir(parents=True, exist_ok=True)
 
-class AgentType(str, Enum):
-    CODE_ARCHITECT = "CodeArchitect"
-    SEC_ANALYST = "SecAnalyst"
-    AUTO_BOT = "AutoBot"
-    AGENT_SUITE = "AgentSuite"
-    CREATIVE_AGENT = "CreativeAgent"
-    AG_CUSTOM = "AgCustom"
+
+# Setup logging
+logger.add(
+    Config.LOGS_DIR / "agent_system_{time}.log",
+    rotation="500 MB",
+    retention="10 days",
+    level="INFO",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {module}:{function}:{line} | {message}"
+)
+
+
+# ============================================
+# DATA MODELS
+# ============================================
+
+class AgentRole(str, Enum):
+    """Agent role enumeration"""
+    CODE_ARCHITECT = "code_architect"
+    SEC_ANALYST = "sec_analyst"
+    AUTO_BOT = "auto_bot"
+    CREATIVE_AGENT = "creative_agent"
+    AGENT_SUITE = "agent_suite"
+    CUSTOM = "custom"
+    ROUTER = "router"
+
+
+class TaskStatus(str, Enum):
+    """Task execution status"""
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class AgentState(TypedDict):
+    """LangGraph agent state"""
+    messages: List[Dict[str, Any]]
+    task: str
+    context: Dict[str, Any]
+    agent_role: str
+    iteration: int
+    max_iterations: int
+    final_output: Optional[str]
+    error: Optional[str]
+    rag_context: Optional[List[str]]
+    metadata: Dict[str, Any]
 
 
 @dataclass
-class AgentConfig:
-    """Agent configuration with resource limits"""
-    name: str
-    type: AgentType
-    description: str
-    tools: List[str] = field(default_factory=list)
-    max_iterations: int = 10
-    timeout: int = 120
-    temperature: float = 0.7
-    system_prompt: str = ""
-
-
-@dataclass
-class TaskState:
-    """Shared state across agent graph"""
+class AgentTask:
+    """Agent task definition"""
     task_id: str
-    objective: str
-    context: Dict[str, Any] = field(default_factory=dict)
-    agent_outputs: Dict[str, Any] = field(default_factory=dict)
-    rag_results: List[Dict[str, Any]] = field(default_factory=list)
-    current_agent: Optional[str] = None
-    completed: bool = False
+    task_type: str
+    description: str
+    parameters: Dict[str, Any] = field(default_factory=dict)
+    status: TaskStatus = TaskStatus.PENDING
+    result: Optional[Any] = None
     error: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.now)
+    completed_at: Optional[datetime] = None
+    assigned_agent: Optional[str] = None
 
 
-# ============================================================================
-# RAG PIPELINE - LIVE WEB SCRAPING
-# ============================================================================
+class AgentResponse(BaseModel):
+    """Standardized agent response"""
+    agent_role: AgentRole
+    task_id: str
+    status: TaskStatus
+    output: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=datetime.now)
 
-class LiveRAGEngine:
-    """Production RAG with real-time web scraping - NO MOCKS"""
+
+# ============================================
+# LLM CLIENT
+# ============================================
+
+class LLMClient:
+    """vLLM client with OpenAI-compatible API"""
     
-    def __init__(self, cse_url: str):
-        self.cse_url = cse_url
-        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
-        self.client = chromadb.Client(Settings(
-            anonymized_telemetry=False,
-            allow_reset=True
-        ))
-        self.collection = self.client.get_or_create_collection(
-            name="live_rag_docs",
-            metadata={"hnsw:space": "cosine"}
-        )
-        self.http_client = httpx.AsyncClient(timeout=30.0)
-        logger.info("LiveRAGEngine initialized")
-    
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
-    async def scrape_google_cse(self, query: str, max_pages: int = 5) -> List[Dict[str, str]]:
-        """Scrape live Google CSE results"""
+    def __init__(self):
+        self.base_url = Config.MODEL_SERVER
+        self.api_key = Config.API_KEY
+        self.model = Config.MODEL_NAME
+        self.client = httpx.AsyncClient(timeout=120.0)
+        
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def generate(
+        self,
+        prompt: str,
+        max_tokens: int = None,
+        temperature: float = None,
+        system_prompt: str = None
+    ) -> str:
+        """Generate text using vLLM server"""
+        messages = []
+        
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        
+        messages.append({"role": "user", "content": prompt})
+        
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens or Config.MODEL_MAX_TOKENS,
+            "temperature": temperature or Config.MODEL_TEMPERATURE,
+        }
+        
         try:
-            search_url = f"{self.cse_url}&q={query}"
-            response = await self.http_client.get(search_url, follow_redirects=True)
+            response = await self.client.post(
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {self.api_key}"}
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"LLM generation error: {e}")
+            raise
+    
+    async def close(self):
+        """Close HTTP client"""
+        await self.client.aclose()
+
+
+# ============================================
+# RAG SYSTEM - WEB SCRAPING
+# ============================================
+
+class WebScraper:
+    """Advanced web scraper for RAG data collection"""
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+    
+    def scrape_google_cse(self, query: str, max_results: int = 10) -> List[str]:
+        """Scrape Google Custom Search Engine"""
+        base_url = Config.WEB_SCRAPE_URL
+        
+        try:
+            # Add query parameter
+            search_url = f"{base_url}&q={query}"
+            response = self.session.get(search_url, timeout=30)
             response.raise_for_status()
             
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(response.text, 'lxml')
+            
+            # Extract search result links
             results = []
+            for link in soup.find_all('a', href=True)[:max_results]:
+                href = link['href']
+                # Filter valid URLs
+                if href.startswith('http') and 'google.com' not in href:
+                    results.append(href)
             
-            # Parse search results
-            for result in soup.select('.gsc-webResult')[:max_pages]:
-                title_elem = result.select_one('.gsc-thumbnail-inside a')
-                snippet_elem = result.select_one('.gsc-table-result .gs-snippet')
-                
-                if title_elem and snippet_elem:
-                    url = title_elem.get('href', '')
-                    title = title_elem.get_text(strip=True)
-                    snippet = snippet_elem.get_text(strip=True)
-                    
-                    # Scrape full page content
-                    content = await self._scrape_page(url)
-                    
-                    results.append({
-                        'url': url,
-                        'title': title,
-                        'snippet': snippet,
-                        'content': content,
-                        'timestamp': datetime.utcnow().isoformat()
-                    })
+            logger.info(f"Scraped {len(results)} URLs for query: {query}")
+            return results[:max_results]
             
-            logger.info(f"Scraped {len(results)} live results for query: {query}")
-            return results
-        
         except Exception as e:
-            logger.error(f"Scraping error: {e}")
+            logger.error(f"Web scraping error: {e}")
             return []
     
-    async def _scrape_page(self, url: str) -> str:
+    def extract_content(self, url: str) -> Optional[str]:
         """Extract text content from URL"""
         try:
-            response = await self.http_client.get(url, timeout=10.0)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            response = self.session.get(url, timeout=15)
+            response.raise_for_status()
             
-            # Remove scripts, styles
-            for elem in soup(['script', 'style', 'nav', 'footer']):
-                elem.decompose()
+            soup = BeautifulSoup(response.text, 'lxml')
             
-            text = soup.get_text(separator=' ', strip=True)
-            return text[:5000]  # Limit content size
-        except:
-            return ""
-    
-    async def index_documents(self, documents: List[Dict[str, str]]):
-        """Index scraped documents into vector DB"""
-        if not documents:
-            return
-        
-        texts = [f"{doc['title']} {doc['snippet']} {doc['content']}" for doc in documents]
-        embeddings = self.embedder.encode(texts, show_progress_bar=False)
-        
-        self.collection.add(
-            embeddings=embeddings.tolist(),
-            documents=texts,
-            metadatas=[{
-                'url': doc['url'],
-                'title': doc['title'],
-                'timestamp': doc['timestamp']
-            } for doc in documents],
-            ids=[f"doc_{i}_{datetime.utcnow().timestamp()}" for i in range(len(documents))]
-        )
-        
-        logger.info(f"Indexed {len(documents)} documents")
-    
-    async def retrieve(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
-        """Retrieve relevant documents"""
-        query_embedding = self.embedder.encode([query])[0]
-        
-        results = self.collection.query(
-            query_embeddings=[query_embedding.tolist()],
-            n_results=top_k
-        )
-        
-        retrieved = []
-        if results['documents']:
-            for i, doc in enumerate(results['documents'][0]):
-                retrieved.append({
-                    'content': doc,
-                    'metadata': results['metadatas'][0][i],
-                    'score': results['distances'][0][i] if 'distances' in results else 0.0
-                })
-        
-        return retrieved
-    
-    async def rag_query(self, query: str) -> Dict[str, Any]:
-        """Complete RAG pipeline: Scrape -> Index -> Retrieve"""
-        # 1. Scrape live data
-        documents = await self.scrape_google_cse(query, max_pages=int(os.getenv('MAX_SCRAPE_PAGES', 5)))
-        
-        # 2. Index into vector DB
-        await self.index_documents(documents)
-        
-        # 3. Retrieve relevant chunks
-        retrieved = await self.retrieve(query, top_k=3)
-        
-        return {
-            'query': query,
-            'scraped_count': len(documents),
-            'retrieved': retrieved,
-            'timestamp': datetime.utcnow().isoformat()
-        }
+            # Remove script and style elements
+            for script in soup(["script", "style", "nav", "footer"]):
+                script.decompose()
+            
+            # Extract text
+            text = soup.get_text(separator='\n', strip=True)
+            
+            # Clean text
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            content = '\n'.join(lines)
+            
+            logger.info(f"Extracted {len(content)} chars from {url}")
+            return content
+            
+        except Exception as e:
+            logger.error(f"Content extraction error for {url}: {e}")
+            return None
 
 
-# ============================================================================
-# BASE AGENT ARCHITECTURE
-# ============================================================================
+class RAGSystem:
+    """Retrieval-Augmented Generation system with live web scraping"""
+    
+    def __init__(self):
+        self.scraper = WebScraper()
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name=Config.EMBEDDING_MODEL,
+            cache_folder=str(Config.CACHE_DIR)
+        )
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=Config.CHUNK_SIZE,
+            chunk_overlap=Config.CHUNK_OVERLAP
+        )
+        self.vector_store: Optional[Chroma] = None
+        self._initialize_vector_store()
+    
+    def _initialize_vector_store(self):
+        """Initialize ChromaDB vector store"""
+        try:
+            self.vector_store = Chroma(
+                persist_directory=Config.VECTOR_DB_PATH,
+                embedding_function=self.embeddings,
+                collection_name="agent_knowledge"
+            )
+            logger.info("Vector store initialized")
+        except Exception as e:
+            logger.error(f"Vector store initialization error: {e}")
+    
+    def ingest_from_web(self, query: str) -> int:
+        """Scrape web and ingest into vector store"""
+        urls = self.scraper.scrape_google_cse(query, Config.MAX_SEARCH_RESULTS)
+        
+        documents = []
+        for url in urls:
+            content = self.scraper.extract_content(url)
+            if content:
+                chunks = self.text_splitter.split_text(content)
+                for i, chunk in enumerate(chunks):
+                    doc = Document(
+                        page_content=chunk,
+                        metadata={
+                            "source": url,
+                            "chunk": i,
+                            "query": query,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    )
+                    documents.append(doc)
+        
+        if documents and self.vector_store:
+            self.vector_store.add_documents(documents)
+            logger.info(f"Ingested {len(documents)} document chunks")
+            return len(documents)
+        
+        return 0
+    
+    def retrieve(self, query: str, k: int = 5) -> List[str]:
+        """Retrieve relevant context for query"""
+        if not self.vector_store:
+            return []
+        
+        try:
+            docs = self.vector_store.similarity_search(query, k=k)
+            contexts = [doc.page_content for doc in docs]
+            logger.info(f"Retrieved {len(contexts)} context chunks")
+            return contexts
+        except Exception as e:
+            logger.error(f"Retrieval error: {e}")
+            return []
+
+
+# ============================================
+# AGENT IMPLEMENTATIONS
+# ============================================
 
 class BaseAgent(ABC):
-    """Abstract base for all specialized agents"""
+    """Abstract base agent class"""
     
-    def __init__(self, config: AgentConfig, llm: ChatOpenAI):
-        self.config = config
-        self.llm = llm
-        self.tools = self._initialize_tools()
-        self.agent = self._build_agent()
-        logger.info(f"Initialized {config.name} ({config.type})")
+    def __init__(self, role: AgentRole, llm_client: LLMClient, rag_system: RAGSystem):
+        self.role = role
+        self.llm = llm_client
+        self.rag = rag_system
+        logger.info(f"Initialized agent: {role.value}")
     
     @abstractmethod
-    def _initialize_tools(self) -> List[Tool]:
-        """Each agent defines its own tools"""
+    def get_system_prompt(self) -> str:
+        """Return agent-specific system prompt"""
         pass
     
-    def _build_agent(self) -> AgentExecutor:
-        """Build LangChain agent with tools"""
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", self.config.system_prompt or f"You are {self.config.name}, a specialized AI agent."),
-            MessagesPlaceholder(variable_name="chat_history", optional=True),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
-        
-        agent = create_openai_functions_agent(self.llm, self.tools, prompt)
-        return AgentExecutor(
-            agent=agent,
-            tools=self.tools,
-            max_iterations=self.config.max_iterations,
-            verbose=True
-        )
-    
-    async def execute(self, task: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+    @abstractmethod
+    async def execute(self, task: str, context: Dict[str, Any]) -> AgentResponse:
         """Execute agent task"""
+        pass
+    
+    async def _generate_with_rag(self, task: str, rag_query: Optional[str] = None) -> str:
+        """Generate response with RAG context"""
+        # Retrieve context
+        contexts = self.rag.retrieve(rag_query or task)
+        
+        # Build prompt with context
+        context_str = "\n\n".join([f"Context {i+1}: {ctx}" for i, ctx in enumerate(contexts)])
+        
+        prompt = f"""Based on the following context, answer the task.
+
+{context_str}
+
+Task: {task}
+
+Provide a comprehensive, actionable response."""
+        
+        return await self.llm.generate(prompt, system_prompt=self.get_system_prompt())
+
+
+class CodeArchitectAgent(BaseAgent):
+    """Code architecture and development agent"""
+    
+    def get_system_prompt(self) -> str:
+        return """You are an elite Software Architect and Engineer specializing in:
+- Clean, modular, production-grade code design
+- Python, JavaScript, Rust, Go, API development
+- Microservices, distributed systems, scalability
+- Best practices: SOLID, DRY, design patterns
+- Performance optimization and algorithm design
+
+Provide code that is: well-documented, type-hinted, error-handled, testable, and enterprise-ready."""
+    
+    async def execute(self, task: str, context: Dict[str, Any]) -> AgentResponse:
         try:
-            result = await asyncio.wait_for(
-                self.agent.ainvoke({"input": task, "chat_history": []}),
-                timeout=self.config.timeout
+            # Check if RAG needed
+            if context.get("use_rag", False):
+                response = await self._generate_with_rag(task)
+            else:
+                response = await self.llm.generate(task, system_prompt=self.get_system_prompt())
+            
+            return AgentResponse(
+                agent_role=self.role,
+                task_id=context.get("task_id", ""),
+                status=TaskStatus.COMPLETED,
+                output=response,
+                metadata={"agent": "code_architect", "context": context}
             )
-            return {
-                'agent': self.config.name,
-                'success': True,
-                'output': result.get('output', ''),
-                'steps': len(result.get('intermediate_steps', []))
-            }
         except Exception as e:
-            logger.error(f"{self.config.name} error: {e}")
-            return {
-                'agent': self.config.name,
-                'success': False,
-                'error': str(e)
-            }
+            logger.error(f"CodeArchitect execution error: {e}")
+            return AgentResponse(
+                agent_role=self.role,
+                task_id=context.get("task_id", ""),
+                status=TaskStatus.FAILED,
+                error=str(e)
+            )
 
 
-# ============================================================================
-# SPECIALIZED AGENTS
-# ============================================================================
-
-class CodeArchitect(BaseAgent):
-    """Code generation, review, optimization"""
+class SecAnalystAgent(BaseAgent):
+    """Security analysis and penetration testing agent"""
     
-    def _initialize_tools(self) -> List[Tool]:
-        return [
-            Tool(
-                name="code_analyzer",
-                func=lambda code: f"Analysis: Clean architecture detected. Modularity: 8/10",
-                description="Analyze code quality and architecture"
-            ),
-            Tool(
-                name="code_generator",
-                func=lambda spec: f"# Generated code\ndef solution(): pass",
-                description="Generate code from specifications"
-            ),
-        ]
+    def get_system_prompt(self) -> str:
+        return """You are a Senior Security Analyst and Ethical Hacker specializing in:
+- Security audits, penetration testing, threat modeling
+- OWASP Top 10, CVE analysis, vulnerability assessment
+- Network security, encryption, authentication/authorization
+- Security best practices and compliance (SOC2, ISO27001)
 
-
-class SecAnalyst(BaseAgent):
-    """Security audits and threat modeling"""
+Provide comprehensive security analysis with actionable remediation steps."""
     
-    def _initialize_tools(self) -> List[Tool]:
-        return [
-            Tool(
-                name="security_scan",
-                func=lambda target: "Scan complete: No critical vulnerabilities",
-                description="Perform security vulnerability scan"
-            ),
-            Tool(
-                name="threat_model",
-                func=lambda system: "Threat model: Authentication, Authorization, Data encryption required",
-                description="Generate threat model"
-            ),
-        ]
+    async def execute(self, task: str, context: Dict[str, Any]) -> AgentResponse:
+        try:
+            response = await self.llm.generate(task, system_prompt=self.get_system_prompt())
+            
+            return AgentResponse(
+                agent_role=self.role,
+                task_id=context.get("task_id", ""),
+                status=TaskStatus.COMPLETED,
+                output=response,
+                metadata={"agent": "sec_analyst", "security_level": "high"}
+            )
+        except Exception as e:
+            logger.error(f"SecAnalyst execution error: {e}")
+            return AgentResponse(
+                agent_role=self.role,
+                task_id=context.get("task_id", ""),
+                status=TaskStatus.FAILED,
+                error=str(e)
+            )
 
 
-class AutoBot(BaseAgent):
-    """Workflow automation and API orchestration"""
+class AutoBotAgent(BaseAgent):
+    """Automation and workflow orchestration agent"""
     
-    def _initialize_tools(self) -> List[Tool]:
-        return [
-            Tool(
-                name="api_connector",
-                func=lambda endpoint: f"Connected to {endpoint}",
-                description="Connect to external APIs"
-            ),
-            Tool(
-                name="workflow_builder",
-                func=lambda steps: f"Workflow created with {len(steps)} steps",
-                description="Build automated workflows"
-            ),
-        ]
+    def get_system_prompt(self) -> str:
+        return """You are an Automation Specialist focusing on:
+- Workflow automation (Airflow, n8n, Zapier, Make)
+- API integrations, webhooks, event-driven architecture
+- CI/CD pipelines, deployment automation
+- Data pipelines (Airbyte, Kafka, ETL)
+- Process optimization and efficiency
 
-
-class AgentSuite(BaseAgent):
-    """Admin, reporting, finance automation"""
+Design robust, scalable automation solutions."""
     
-    def _initialize_tools(self) -> List[Tool]:
-        return [
-            Tool(
-                name="report_generator",
-                func=lambda data: "Report generated with KPIs",
-                description="Generate business reports"
-            ),
-        ]
+    async def execute(self, task: str, context: Dict[str, Any]) -> AgentResponse:
+        try:
+            response = await self.llm.generate(task, system_prompt=self.get_system_prompt())
+            
+            return AgentResponse(
+                agent_role=self.role,
+                task_id=context.get("task_id", ""),
+                status=TaskStatus.COMPLETED,
+                output=response,
+                metadata={"agent": "auto_bot", "automation_type": context.get("type", "general")}
+            )
+        except Exception as e:
+            logger.error(f"AutoBot execution error: {e}")
+            return AgentResponse(
+                agent_role=self.role,
+                task_id=context.get("task_id", ""),
+                status=TaskStatus.FAILED,
+                error=str(e)
+            )
 
 
 class CreativeAgent(BaseAgent):
-    """Content creation: text, audio, visual"""
+    """Creative content generation agent"""
     
-    def _initialize_tools(self) -> List[Tool]:
-        return [
-            Tool(
-                name="content_writer",
-                func=lambda prompt: f"Creative content: {prompt}...",
-                description="Generate creative content"
-            ),
-        ]
+    def get_system_prompt(self) -> str:
+        return """You are a Creative Content Specialist expert in:
+- Content creation: articles, blogs, marketing copy
+- Visual design concepts and specifications
+- Audio/video script writing
+- Brand storytelling and messaging
+- SEO optimization and engagement strategies
 
-
-class AgCustom(BaseAgent):
-    """Custom configurable agent"""
+Create compelling, engaging, high-quality content."""
     
-    def _initialize_tools(self) -> List[Tool]:
-        return [
-            Tool(
-                name="custom_tool",
-                func=lambda x: f"Custom processing: {x}",
-                description="Custom agent tool"
-            ),
-        ]
+    async def execute(self, task: str, context: Dict[str, Any]) -> AgentResponse:
+        try:
+            response = await self.llm.generate(
+                task,
+                system_prompt=self.get_system_prompt(),
+                temperature=0.9  # Higher creativity
+            )
+            
+            return AgentResponse(
+                agent_role=self.role,
+                task_id=context.get("task_id", ""),
+                status=TaskStatus.COMPLETED,
+                output=response,
+                metadata={"agent": "creative", "content_type": context.get("content_type", "text")}
+            )
+        except Exception as e:
+            logger.error(f"CreativeAgent execution error: {e}")
+            return AgentResponse(
+                agent_role=self.role,
+                task_id=context.get("task_id", ""),
+                status=TaskStatus.FAILED,
+                error=str(e)
+            )
 
 
-# ============================================================================
-# ORCHESTRATION CORE
-# ============================================================================
+class AgentSuiteAgent(BaseAgent):
+    """Business operations and administrative agent"""
+    
+    def get_system_prompt(self) -> str:
+        return """You are a Business Operations Manager specializing in:
+- Report generation and data analysis
+- Financial modeling and budgeting
+- Operations automation and optimization
+- Project management and planning
+- Resource allocation and efficiency
+
+Provide data-driven, actionable business insights."""
+    
+    async def execute(self, task: str, context: Dict[str, Any]) -> AgentResponse:
+        try:
+            response = await self.llm.generate(task, system_prompt=self.get_system_prompt())
+            
+            return AgentResponse(
+                agent_role=self.role,
+                task_id=context.get("task_id", ""),
+                status=TaskStatus.COMPLETED,
+                output=response,
+                metadata={"agent": "agent_suite", "ops_type": context.get("ops_type", "general")}
+            )
+        except Exception as e:
+            logger.error(f"AgentSuite execution error: {e}")
+            return AgentResponse(
+                agent_role=self.role,
+                task_id=context.get("task_id", ""),
+                status=TaskStatus.FAILED,
+                error=str(e)
+            )
+
+
+class CustomAgentBuilder:
+    """Dynamic custom agent builder"""
+    
+    def __init__(self, llm_client: LLMClient, rag_system: RAGSystem):
+        self.llm = llm_client
+        self.rag = rag_system
+        self.custom_agents: Dict[str, BaseAgent] = {}
+    
+    def create_custom_agent(
+        self,
+        agent_id: str,
+        system_prompt: str,
+        capabilities: List[str]
+    ) -> BaseAgent:
+        """Create a custom agent with specific capabilities"""
+        
+        class DynamicCustomAgent(BaseAgent):
+            def __init__(self, llm, rag, custom_prompt):
+                super().__init__(AgentRole.CUSTOM, llm, rag)
+                self.custom_prompt = custom_prompt
+            
+            def get_system_prompt(self) -> str:
+                return self.custom_prompt
+            
+            async def execute(self, task: str, context: Dict[str, Any]) -> AgentResponse:
+                try:
+                    response = await self.llm.generate(task, system_prompt=self.get_system_prompt())
+                    return AgentResponse(
+                        agent_role=self.role,
+                        task_id=context.get("task_id", ""),
+                        status=TaskStatus.COMPLETED,
+                        output=response,
+                        metadata={"agent": "custom", "agent_id": context.get("agent_id", "")}
+                    )
+                except Exception as e:
+                    logger.error(f"CustomAgent execution error: {e}")
+                    return AgentResponse(
+                        agent_role=self.role,
+                        task_id=context.get("task_id", ""),
+                        status=TaskStatus.FAILED,
+                        error=str(e)
+                    )
+        
+        agent = DynamicCustomAgent(self.llm, self.rag, system_prompt)
+        self.custom_agents[agent_id] = agent
+        logger.info(f"Created custom agent: {agent_id}")
+        return agent
+    
+    def get_agent(self, agent_id: str) -> Optional[BaseAgent]:
+        """Retrieve custom agent by ID"""
+        return self.custom_agents.get(agent_id)
+
+
+# ============================================
+# AGENT ORCHESTRATION - LANGGRAPH
+# ============================================
 
 class AgentOrchestrator:
-    """Multi-agent task orchestration with LangGraph"""
+    """LangGraph-based multi-agent orchestrator"""
     
-    def __init__(self, llm: ChatOpenAI, rag_engine: LiveRAGEngine):
-        self.llm = llm
-        self.rag_engine = rag_engine
-        self.agents = self._initialize_agents()
-        self.graph = self._build_graph()
-        logger.info("AgentOrchestrator initialized with LangGraph")
-    
-    def _initialize_agents(self) -> Dict[AgentType, BaseAgent]:
-        """Initialize all specialized agents"""
-        configs = {
-            AgentType.CODE_ARCHITECT: AgentConfig(
-                name="CodeArchitect",
-                type=AgentType.CODE_ARCHITECT,
-                description="Expert in code architecture and development",
-                system_prompt="You are an elite software architect. Provide clean, modular, production-ready code."
-            ),
-            AgentType.SEC_ANALYST: AgentConfig(
-                name="SecAnalyst",
-                type=AgentType.SEC_ANALYST,
-                description="Security expert for audits and threat modeling",
-                system_prompt="You are a security analyst. Focus on vulnerabilities and threat mitigation."
-            ),
-            AgentType.AUTO_BOT: AgentConfig(
-                name="AutoBot",
-                type=AgentType.AUTO_BOT,
-                description="Automation specialist for workflows and APIs",
-                system_prompt="You automate workflows and integrate APIs efficiently."
-            ),
-            AgentType.AGENT_SUITE: AgentConfig(
-                name="AgentSuite",
-                type=AgentType.AGENT_SUITE,
-                description="Admin and reporting automation",
-                system_prompt="You handle admin tasks, reports, and operations."
-            ),
-            AgentType.CREATIVE_AGENT: AgentConfig(
-                name="CreativeAgent",
-                type=AgentType.CREATIVE_AGENT,
-                description="Creative content generation",
-                system_prompt="You create engaging content across text, audio, visual formats."
-            ),
-            AgentType.AG_CUSTOM: AgentConfig(
-                name="AgCustom",
-                type=AgentType.AG_CUSTOM,
-                description="Custom configurable agent",
-                system_prompt="You are a flexible agent for custom tasks."
-            ),
+    def __init__(self):
+        self.llm = LLMClient()
+        self.rag = RAGSystem()
+        
+        # Initialize agents
+        self.agents = {
+            AgentRole.CODE_ARCHITECT: CodeArchitectAgent(AgentRole.CODE_ARCHITECT, self.llm, self.rag),
+            AgentRole.SEC_ANALYST: SecAnalystAgent(AgentRole.SEC_ANALYST, self.llm, self.rag),
+            AgentRole.AUTO_BOT: AutoBotAgent(AgentRole.AUTO_BOT, self.llm, self.rag),
+            AgentRole.CREATIVE_AGENT: CreativeAgent(AgentRole.CREATIVE_AGENT, self.llm, self.rag),
+            AgentRole.AGENT_SUITE: AgentSuiteAgent(AgentRole.AGENT_SUITE, self.llm, self.rag),
         }
         
-        agent_classes = {
-            AgentType.CODE_ARCHITECT: CodeArchitect,
-            AgentType.SEC_ANALYST: SecAnalyst,
-            AgentType.AUTO_BOT: AutoBot,
-            AgentType.AGENT_SUITE: AgentSuite,
-            AgentType.CREATIVE_AGENT: CreativeAgent,
-            AgentType.AG_CUSTOM: AgCustom,
-        }
+        self.custom_builder = CustomAgentBuilder(self.llm, self.rag)
+        self.workflow = self._build_workflow()
         
-        return {
-            agent_type: agent_classes[agent_type](config, self.llm)
-            for agent_type, config in configs.items()
-        }
+        logger.info("AgentOrchestrator initialized with all agents")
     
-    def _build_graph(self) -> StateGraph:
+    def _build_workflow(self) -> StateGraph:
         """Build LangGraph workflow"""
-        workflow = StateGraph(TaskState)
+        workflow = StateGraph(AgentState)
         
-        # Define nodes
-        workflow.add_node("rag_retrieval", self._rag_node)
-        workflow.add_node("code_architect", self._code_architect_node)
-        workflow.add_node("sec_analyst", self._sec_analyst_node)
-        workflow.add_node("auto_bot", self._auto_bot_node)
-        workflow.add_node("agent_suite", self._agent_suite_node)
-        workflow.add_node("creative_agent", self._creative_agent_node)
-        workflow.add_node("finalize", self._finalize_node)
+        # Add nodes
+        workflow.add_node("router", self._route_task)
+        workflow.add_node("code_architect", self._execute_code_architect)
+        workflow.add_node("sec_analyst", self._execute_sec_analyst)
+        workflow.add_node("auto_bot", self._execute_auto_bot)
+        workflow.add_node("creative_agent", self._execute_creative_agent)
+        workflow.add_node("agent_suite", self._execute_agent_suite)
+        workflow.add_node("finalize", self._finalize_result)
         
-        # Define edges
-        workflow.set_entry_point("rag_retrieval")
-        workflow.add_edge("rag_retrieval", "code_architect")
-        workflow.add_edge("code_architect", "sec_analyst")
-        workflow.add_edge("sec_analyst", "auto_bot")
-        workflow.add_edge("auto_bot", "agent_suite")
-        workflow.add_edge("agent_suite", "creative_agent")
-        workflow.add_edge("creative_agent", "finalize")
+        # Set entry point
+        workflow.set_entry_point("router")
+        
+        # Add conditional edges from router
+        workflow.add_conditional_edges(
+            "router",
+            self._route_decision,
+            {
+                "code_architect": "code_architect",
+                "sec_analyst": "sec_analyst",
+                "auto_bot": "auto_bot",
+                "creative_agent": "creative_agent",
+                "agent_suite": "agent_suite",
+                "end": END
+            }
+        )
+        
+        # Add edges to finalize
+        for agent in ["code_architect", "sec_analyst", "auto_bot", "creative_agent", "agent_suite"]:
+            workflow.add_edge(agent, "finalize")
+        
         workflow.add_edge("finalize", END)
         
         return workflow.compile()
     
-    async def _rag_node(self, state: TaskState) -> TaskState:
-        """RAG retrieval node"""
-        logger.info(f"RAG retrieval for: {state.objective}")
-        rag_result = await self.rag_engine.rag_query(state.objective)
-        state.rag_results = rag_result['retrieved']
-        state.context['rag_data'] = rag_result
-        return state
-    
-    async def _code_architect_node(self, state: TaskState) -> TaskState:
-        """CodeArchitect agent node"""
-        state.current_agent = "CodeArchitect"
-        context = f"RAG Context: {state.rag_results[:2]}\nTask: {state.objective}"
-        result = await self.agents[AgentType.CODE_ARCHITECT].execute(context)
-        state.agent_outputs['code_architect'] = result
-        return state
-    
-    async def _sec_analyst_node(self, state: TaskState) -> TaskState:
-        """SecAnalyst agent node"""
-        state.current_agent = "SecAnalyst"
-        code_output = state.agent_outputs.get('code_architect', {})
-        task = f"Security audit of: {code_output.get('output', state.objective)}"
-        result = await self.agents[AgentType.SEC_ANALYST].execute(task)
-        state.agent_outputs['sec_analyst'] = result
-        return state
-    
-    async def _auto_bot_node(self, state: TaskState) -> TaskState:
-        """AutoBot agent node"""
-        state.current_agent = "AutoBot"
-        result = await self.agents[AgentType.AUTO_BOT].execute(f"Automate: {state.objective}")
-        state.agent_outputs['auto_bot'] = result
-        return state
-    
-    async def _agent_suite_node(self, state: TaskState) -> TaskState:
-        """AgentSuite agent node"""
-        state.current_agent = "AgentSuite"
-        result = await self.agents[AgentType.AGENT_SUITE].execute(f"Admin tasks for: {state.objective}")
-        state.agent_outputs['agent_suite'] = result
-        return state
-    
-    async def _creative_agent_node(self, state: TaskState) -> TaskState:
-        """CreativeAgent agent node"""
-        state.current_agent = "CreativeAgent"
-        result = await self.agents[AgentType.CREATIVE_AGENT].execute(f"Create content: {state.objective}")
-        state.agent_outputs['creative_agent'] = result
-        return state
-    
-    async def _finalize_node(self, state: TaskState) -> TaskState:
-        """Finalization node"""
-        state.completed = True
-        state.current_agent = None
-        state.metadata['completion_time'] = datetime.utcnow().isoformat()
-        logger.info(f"Task {state.task_id} completed")
-        return state
-    
-    async def execute_task(self, objective: str, task_id: str = None) -> TaskState:
-        """Execute multi-agent task"""
-        task_id = task_id or f"task_{datetime.utcnow().timestamp()}"
+    async def _route_task(self, state: AgentState) -> AgentState:
+        """Route task to appropriate agent"""
+        task = state["task"].lower()
         
-        initial_state = TaskState(
+        # Simple keyword-based routing (can be enhanced with LLM-based routing)
+        routing_keywords = {
+            "code": AgentRole.CODE_ARCHITECT,
+            "security": AgentRole.SEC_ANALYST,
+            "automate": AgentRole.AUTO_BOT,
+            "creative": AgentRole.CREATIVE_AGENT,
+            "business": AgentRole.AGENT_SUITE,
+        }
+        
+        for keyword, role in routing_keywords.items():
+            if keyword in task:
+                state["agent_role"] = role.value
+                logger.info(f"Routed task to: {role.value}")
+                return state
+        
+        # Default to code architect
+        state["agent_role"] = AgentRole.CODE_ARCHITECT.value
+        logger.info("Routed task to default: code_architect")
+        return state
+    
+    def _route_decision(self, state: AgentState) -> str:
+        """Decide next node based on agent_role"""
+        agent_role = state.get("agent_role", "")
+        
+        if state.get("error"):
+            return "end"
+        
+        return agent_role if agent_role else "end"
+    
+    async def _execute_code_architect(self, state: AgentState) -> AgentState:
+        """Execute CodeArchitect agent"""
+        agent = self.agents[AgentRole.CODE_ARCHITECT]
+        response = await agent.execute(state["task"], state["context"])
+        state["final_output"] = response.output
+        state["metadata"]["agent_response"] = response.dict()
+        return state
+    
+    async def _execute_sec_analyst(self, state: AgentState) -> AgentState:
+        """Execute SecAnalyst agent"""
+        agent = self.agents[AgentRole.SEC_ANALYST]
+        response = await agent.execute(state["task"], state["context"])
+        state["final_output"] = response.output
+        state["metadata"]["agent_response"] = response.dict()
+        return state
+    
+    async def _execute_auto_bot(self, state: AgentState) -> AgentState:
+        """Execute AutoBot agent"""
+        agent = self.agents[AgentRole.AUTO_BOT]
+        response = await agent.execute(state["task"], state["context"])
+        state["final_output"] = response.output
+        state["metadata"]["agent_response"] = response.dict()
+        return state
+    
+    async def _execute_creative_agent(self, state: AgentState) -> AgentState:
+        """Execute Creative agent"""
+        agent = self.agents[AgentRole.CREATIVE_AGENT]
+        response = await agent.execute(state["task"], state["context"])
+        state["final_output"] = response.output
+        state["metadata"]["agent_response"] = response.dict()
+        return state
+    
+    async def _execute_agent_suite(self, state: AgentState) -> AgentState:
+        """Execute AgentSuite agent"""
+        agent = self.agents[AgentRole.AGENT_SUITE]
+        response = await agent.execute(state["task"], state["context"])
+        state["final_output"] = response.output
+        state["metadata"]["agent_response"] = response.dict()
+        return state
+    
+    async def _finalize_result(self, state: AgentState) -> AgentState:
+        """Finalize and format result"""
+        state["iteration"] += 1
+        state["metadata"]["completed_at"] = datetime.now().isoformat()
+        logger.info(f"Task completed by {state['agent_role']}")
+        return state
+    
+    async def execute_task(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        use_rag: bool = False,
+        rag_query: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Execute task through agent workflow"""
+        
+        # Ingest RAG data if needed
+        if use_rag and rag_query:
+            self.rag.ingest_from_web(rag_query)
+        
+        # Initialize state
+        initial_state: AgentState = {
+            "messages": [],
+            "task": task,
+            "context": context or {},
+            "agent_role": "",
+            "iteration": 0,
+            "max_iterations": Config.MAX_AGENT_ITERATIONS,
+            "final_output": None,
+            "error": None,
+            "rag_context": None,
+            "metadata": {
+                "started_at": datetime.now().isoformat(),
+                "use_rag": use_rag
+            }
+        }
+        
+        try:
+            # Execute workflow
+            result = await self.workflow.ainvoke(initial_state)
+            return result
+        except Exception as e:
+            logger.error(f"Workflow execution error: {e}")
+            return {
+                "error": str(e),
+                "status": "failed"
+            }
+    
+    async def cleanup(self):
+        """Cleanup resources"""
+        await self.llm.close()
+
+
+# ============================================
+# MAIN SYSTEM CLASS
+# ============================================
+
+class AIAgentPlatform:
+    """Main AI Agent Platform orchestrator"""
+    
+    def __init__(self):
+        Config.setup_directories()
+        self.orchestrator = AgentOrchestrator()
+        self.tasks: Dict[str, AgentTask] = {}
+        logger.info("AI Agent Platform initialized")
+    
+    async def create_task(
+        self,
+        task_type: str,
+        description: str,
+        parameters: Optional[Dict[str, Any]] = None
+    ) -> AgentTask:
+        """Create new agent task"""
+        task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{len(self.tasks)}"
+        
+        task = AgentTask(
             task_id=task_id,
-            objective=objective,
-            metadata={'start_time': datetime.utcnow().isoformat()}
+            task_type=task_type,
+            description=description,
+            parameters=parameters or {}
         )
         
-        logger.info(f"Starting task {task_id}: {objective}")
-        final_state = await self.graph.ainvoke(initial_state)
-        return final_state
-
-
-# ============================================================================
-# API LAYER
-# ============================================================================
-
-class SystemAPI:
-    """FastAPI interface for orchestrator"""
+        self.tasks[task_id] = task
+        logger.info(f"Created task: {task_id}")
+        return task
     
-    def __init__(self, orchestrator: AgentOrchestrator):
-        self.orchestrator = orchestrator
-        self.tasks: Dict[str, TaskState] = {}
-    
-    async def submit_task(self, objective: str) -> Dict[str, Any]:
-        """Submit new task"""
-        task_id = f"task_{datetime.utcnow().timestamp()}"
-        
-        # Execute asynchronously
-        task_state = await self.orchestrator.execute_task(objective, task_id)
-        self.tasks[task_id] = task_state
-        
-        return {
-            'task_id': task_id,
-            'status': 'completed' if task_state.completed else 'running',
-            'agents_executed': list(task_state.agent_outputs.keys()),
-            'rag_results_count': len(task_state.rag_results)
-        }
-    
-    def get_task_status(self, task_id: str) -> Dict[str, Any]:
-        """Get task status"""
+    async def execute_task(self, task_id: str) -> AgentTask:
+        """Execute task by ID"""
         task = self.tasks.get(task_id)
         if not task:
-            return {'error': 'Task not found'}
+            raise ValueError(f"Task not found: {task_id}")
         
-        return {
-            'task_id': task.task_id,
-            'objective': task.objective,
-            'completed': task.completed,
-            'current_agent': task.current_agent,
-            'agent_outputs': task.agent_outputs,
-            'error': task.error
-        }
+        task.status = TaskStatus.IN_PROGRESS
+        
+        try:
+            result = await self.orchestrator.execute_task(
+                task=task.description,
+                context={"task_id": task_id, **task.parameters},
+                use_rag=task.parameters.get("use_rag", False),
+                rag_query=task.parameters.get("rag_query")
+            )
+            
+            task.result = result
+            task.status = TaskStatus.COMPLETED
+            task.completed_at = datetime.now()
+            
+        except Exception as e:
+            task.error = str(e)
+            task.status = TaskStatus.FAILED
+            logger.error(f"Task execution failed: {task_id} - {e}")
+        
+        return task
     
-    def list_tasks(self) -> List[Dict[str, Any]]:
+    def get_task(self, task_id: str) -> Optional[AgentTask]:
+        """Get task by ID"""
+        return self.tasks.get(task_id)
+    
+    def list_tasks(self) -> List[AgentTask]:
         """List all tasks"""
-        return [
-            {
-                'task_id': task.task_id,
-                'objective': task.objective[:100],
-                'completed': task.completed,
-                'agents': list(task.agent_outputs.keys())
-            }
-            for task in self.tasks.values()
-        ]
+        return list(self.tasks.values())
+    
+    async def shutdown(self):
+        """Shutdown platform"""
+        await self.orchestrator.cleanup()
+        logger.info("Platform shutdown complete")
+
+
+# ============================================
+# SINGLETON INSTANCE
+# ============================================
+
+_platform_instance: Optional[AIAgentPlatform] = None
+
+def get_platform() -> AIAgentPlatform:
+    """Get or create platform singleton"""
+    global _platform_instance
+    if _platform_instance is None:
+        _platform_instance = AIAgentPlatform()
+    return _platform_instance
