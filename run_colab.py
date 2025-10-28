@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Google Colab launcher with NGROK tunneling for AI Agents Platform.
-Optimized for serverless deployment with minimal overhead.
+Fixed port conflicts and dependency handling.
 """
 
 import os
@@ -9,36 +9,94 @@ import sys
 import subprocess
 import threading
 import json
-import asyncio
+import socket
+import time
 from pathlib import Path
 
 class ColabLauncher:
     def __init__(self):
         self.ngrok_auth = os.getenv('NGROK_AUTH_TOKEN')
-        self.api_port = int(os.getenv('API_PORT', 8000))
-        self.dashboard_port = int(os.getenv('DASHBOARD_PORT', 8080))
+        self.api_port = self._find_free_port(8000)
+        self.dashboard_port = self._find_free_port(8080)
+        os.environ['API_PORT'] = str(self.api_port)
+        os.environ['DASHBOARD_PORT'] = str(self.dashboard_port)
         
+    def _find_free_port(self, start_port):
+        """Find next available port starting from start_port."""
+        port = start_port
+        while port < start_port + 100:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(('', port))
+                    return port
+                except OSError:
+                    port += 1
+        return start_port
+    
     def setup_environment(self):
-        """Configure Colab environment with optimized settings."""
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '-r', 'requirements.txt'])
+        """Configure environment with proper dependency installation."""
+        print("Installing dependencies...")
         
+        # Install requirements with proper error handling
+        req_file = Path('requirements.txt')
+        if req_file.exists():
+            result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'install', '-q', '-r', 'requirements.txt'],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                print(f"Warning: Some packages failed to install: {result.stderr}")
+        
+        # Install pyngrok separately if needed
+        try:
+            import pyngrok
+        except ImportError:
+            subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'pyngrok'])
+        
+        # Setup NGROK
         if self.ngrok_auth:
-            subprocess.run(['ngrok', 'authtoken', self.ngrok_auth], check=False)
+            try:
+                from pyngrok import ngrok
+                ngrok.set_auth_token(self.ngrok_auth)
+                print("NGROK configured successfully")
+            except Exception as e:
+                print(f"NGROK setup warning: {e}")
     
     def start_ngrok(self, port, name):
-        """Initialize NGROK tunnel for external access."""
+        """Initialize NGROK tunnel with error handling."""
         try:
             from pyngrok import ngrok
             public_url = ngrok.connect(port, bind_tls=True)
-            print(f"[{name}] Public URL: {public_url}")
+            print(f"\n✓ [{name}] Public URL: {public_url}")
             return public_url
+        except ImportError:
+            print(f"[{name}] NGROK not available - using local access only")
+            return f"http://localhost:{port}"
         except Exception as e:
-            print(f"NGROK setup failed: {e}")
-            return None
+            print(f"[{name}] NGROK tunnel failed: {e}")
+            return f"http://localhost:{port}"
+    
+    def serve_dashboard(self):
+        """Custom dashboard server to avoid port conflicts."""
+        import http.server
+        import socketserver
+        
+        class DashboardHandler(http.server.SimpleHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == '/' or self.path == '/dashboard.html':
+                    self.path = '/dashboard.html'
+                return super().do_GET()
+        
+        with socketserver.TCPServer(("", self.dashboard_port), DashboardHandler) as httpd:
+            print(f"Dashboard serving at port {self.dashboard_port}")
+            httpd.serve_forever()
     
     def launch_services(self):
-        """Launch core services with threading for concurrent execution."""
-        services = []
+        """Launch services with proper error handling."""
+        print(f"\nStarting services...")
+        print(f"API Port: {self.api_port}")
+        print(f"Dashboard Port: {self.dashboard_port}")
         
         # API Server
         api_thread = threading.Thread(
@@ -50,24 +108,28 @@ class ColabLauncher:
         )
         api_thread.daemon = True
         api_thread.start()
-        services.append(('API', self.api_port))
         
         # Dashboard Server
-        dashboard_thread = threading.Thread(
-            target=lambda: subprocess.run([
-                sys.executable, '-m', 'http.server', 
-                str(self.dashboard_port), '--directory', '.'
-            ])
-        )
+        dashboard_thread = threading.Thread(target=self.serve_dashboard)
         dashboard_thread.daemon = True
         dashboard_thread.start()
-        services.append(('Dashboard', self.dashboard_port))
         
-        # NGROK tunnels
-        for name, port in services:
-            self.start_ngrok(port, name)
+        # Wait for services to start
+        time.sleep(3)
         
-        print("\n✓ Platform initialized. Services running.")
+        # Start NGROK tunnels
+        api_url = self.start_ngrok(self.api_port, 'API')
+        dashboard_url = self.start_ngrok(self.dashboard_port, 'Dashboard')
+        
+        print("\n" + "="*50)
+        print("✓ AI AGENTS PLATFORM READY")
+        print("="*50)
+        print(f"API Local: http://localhost:{self.api_port}")
+        print(f"Dashboard Local: http://localhost:{self.dashboard_port}")
+        if 'ngrok' in str(api_url):
+            print(f"API Public: {api_url}")
+            print(f"Dashboard Public: {dashboard_url}")
+        print("="*50 + "\n")
         
     def run(self):
         """Main execution flow."""
@@ -76,7 +138,7 @@ class ColabLauncher:
         
         try:
             while True:
-                threading.Event().wait(1)
+                time.sleep(1)
         except KeyboardInterrupt:
             print("\nShutting down platform...")
             sys.exit(0)
